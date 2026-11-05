@@ -2,6 +2,10 @@
 //! then run the display with LASTFM_API_URL=http://localhost:9911/2.0/
 //!
 //! Switch scenarios with: curl -X POST localhost:9911/mode/<playing|stopped|noart|long>
+//!
+//! Also a fake VinylVault shelf that owns the test album:
+//!   VINYLVAULT_SHELF=http://localhost:9911/shelf/test
+//!   curl -X POST localhost:9911/finish/<solid|marbled|splatter|swirl|galaxy|picture_disc|half_and_half|clear|glow>
 
 use std::io::Cursor;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,11 +48,36 @@ fn main() {
     let server = Server::http("127.0.0.1:9911").unwrap();
     println!("mock Last.fm on http://localhost:9911/2.0/");
     let mut mode = String::from("playing");
+    let mut finish = String::from("marbled");
     for req in server.incoming_requests() {
         let url = req.url().to_string();
         if *req.method() == Method::Post && url.starts_with("/mode/") {
             mode = url[6..].to_string();
             let _ = req.respond(Response::from_string(mode.clone()));
+            continue;
+        }
+        if *req.method() == Method::Post && url.starts_with("/finish/") {
+            finish = url[8..].to_string();
+            let _ = req.respond(Response::from_string(finish.clone()));
+            continue;
+        }
+        if url.starts_with("/shelf/") && url.ends_with(".json") {
+            let (name, hexes) = match finish.as_str() {
+                "solid" => ("Translucent Blue", r##"["#3D70D6"]"##),
+                "splatter" => ("Yellow w/ Black & Red Splatter", r##"["#F5D140","#1A1A1C","#CC292E"]"##),
+                "swirl" => ("Purple, Pink & Cyan Swirl", r##"["#824DBF","#F599BD","#4DC7DB"]"##),
+                "galaxy" => ("Black Galaxy", r##"["#1A1A1C","#824DBF"]"##),
+                "picture_disc" => ("Picture Disc", "[]"),
+                "half_and_half" => ("Orange / Black Half & Half", r##"["#F28726","#1A1A1C"]"##),
+                "clear" => ("Clear", "[]"),
+                "glow" => ("Glow In The Dark", "[]"),
+                _ => ("Red Marbled", r##"["#CC292E","#F7F7F5"]"##),
+            };
+            let body = format!(
+                r#"{{"name":"test","records":[{{"release_title":"Signals From the Lake (Deluxe Edition)","artist_name":"Elsa Morrow","release_year":2024,"pressing":{{"colourway_name":"{name}","finish":"{finish}","colour_hexes":{hexes},"edition_size":500,"is_limited":true,"is_numbered":false,"format":"LP","disc_count":1}}}}]}}"#
+            );
+            let json = Header::from_bytes("Content-Type", "application/json").unwrap();
+            let _ = req.respond(Response::from_string(body).with_header(json));
             continue;
         }
         if url.starts_with("/i/u/") {

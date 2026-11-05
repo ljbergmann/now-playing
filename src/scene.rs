@@ -14,6 +14,7 @@ use crate::draw::{self, Align, DIM, Rgba, WHITE};
 use crate::fonts::Fonts;
 use crate::lastfm::Track;
 use crate::themes;
+use crate::vinylvault::Pressing;
 
 /// A finished frame in 0RGB (what both the DRM buffer and the Mac window use).
 pub struct Scene {
@@ -51,8 +52,11 @@ pub struct Spinner {
     pub size: usize,
     /// size×size 0RGB texture (unrotated).
     pub label: Vec<u32>,
-    /// size×size coverage (anti-aliased circle edge).
+    /// size×size coverage (anti-aliased circle edge; partial for clear vinyl).
     pub mask: Vec<u8>,
+    /// Optional size×size ARGB layer that stays put on top of the rotating
+    /// texture: light reflections, the tonearm and its shadow.
+    pub overlay: Option<Vec<u32>>,
     /// Whether it should be turning (it spins up and down smoothly).
     pub spinning: bool,
 }
@@ -77,8 +81,9 @@ impl Theme {
 
 pub enum View<'a> {
     Connecting(Option<&'a str>),
-    /// `track` = most recent track (if any); `idle` = show the clock screen.
-    Track { track: Option<&'a Track>, idle: bool },
+    /// `track` = most recent track (if any); `idle` = show the clock screen;
+    /// `pressing` = the copy you own of this album (VinylVault), if any.
+    Track { track: Option<&'a Track>, idle: bool, pressing: Option<&'a Pressing> },
 }
 
 /// What a theme needs to draw.
@@ -86,6 +91,7 @@ pub struct Ctx<'a> {
     pub fonts: &'a Fonts,
     pub track: Option<&'a Track>,
     pub playing: bool,
+    pub pressing: Option<&'a Pressing>,
     pub now: SystemTime,
     pub twelve_hour: bool,
 }
@@ -108,7 +114,7 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
             connecting(&mut pm, fonts, err.unwrap_or("Waiting for the network"));
             Extras::default()
         }
-        View::Track { track, idle } => {
+        View::Track { track, idle, pressing } => {
             // No cover on Last.fm? Use generated art so every look stays complete.
             let filled;
             let track = match track {
@@ -120,7 +126,7 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
                 }
                 other => *other,
             };
-            let ctx = Ctx { fonts, track, playing: !idle, now, twelve_hour };
+            let ctx = Ctx { fonts, track, playing: !idle, pressing: *pressing, now, twelve_hour };
             match theme {
                 Theme::Vinyl => themes::vinyl::render(&mut pm, &ctx),
                 Theme::Poster => themes::poster::render(&mut pm, &ctx),

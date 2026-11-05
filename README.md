@@ -22,6 +22,21 @@ Pick one with `THEME` (switch live on the Mac with keys `1` `2` `3`):
 | `ambient` | Cover floating on a slowly drifting colour field made from its own colours | Thin clock in the middle, last cover as a small thumbnail |
 
 Tracks without cover art get generated art (colours derived from the track name).
+
+### Your own pressings (VinylVault)
+
+If you keep your records in [VinylVault](https://vinylvault.sky-lab.de), the vinyl look
+can draw the record as **the pressing you own** whenever Last.fm plays an album that's on
+your shelf: marbled, splatter, swirl, galaxy, picture disc, half & half, clear, glow or
+solid colour, with a "YOUR PRESSING · RED MARBLED · LTD. 500" line. Albums you don't own
+(or own on plain black) stay black.
+
+1. In the VinylVault app, switch on shelf sharing and copy the link.
+2. Set `VINYLVAULT_SHELF` to that link (or just the slug at its end).
+
+The shelf is read-only and public only while sharing is on, so no password goes on the Pi.
+It refreshes every 15 minutes; matching ignores "(Deluxe Edition)", " - Single" and
+featured artists.
 `CLOCK=12h` switches the clock to 12-hour time.
 
 ## How it works
@@ -42,6 +57,8 @@ NEON-vectorised on the Pi) and redraws the tiny equalizer region.
 | `src/scene.rs` | Renders a complete frame in the chosen look; text layout |
 | `src/themes/` | The three looks: `vinyl.rs`, `poster.rs`, `ambient.rs` |
 | `src/draw.rs` | Shared drawing: text, shapes, cover scaling, palette, clock |
+| `src/vinylvault.rs` | Reads a shared VinylVault shelf, matches albums to your pressings |
+| `src/themes/pressing.rs` | Draws the nine vinyl finishes as a spinning record |
 | `src/frame.rs` | Per-frame work: crossfade, colour drift, spinning label, equalizer |
 | `src/display/kms.rs` | Pi output: double-buffered DRM/KMS with vsync page flips |
 | `src/display/window.rs` | Mac output: a window, for development |
@@ -99,6 +116,7 @@ or edit `/etc/now-playing/env` and `sudo systemctl restart now-playing`:
 |---|---|
 | `THEME` | `vinyl` (default), `poster`, `ambient` |
 | `CLOCK` | `24h` (default) or `12h` |
+| `VINYLVAULT_SHELF` | your shared VinylVault shelf link or slug (optional) |
 | `ROTATE` | `0`, `90`, `180`, `270` (clockwise), or `auto` (default) |
 | `CONNECTOR` | e.g. `HDMI-A-1`, `DSI-1` (default: first connected screen) |
 
@@ -113,6 +131,8 @@ cargo run --release --example mock_lastfm      # fake Last.fm on :9911
 LASTFM_USER=x LASTFM_API_KEY=x LASTFM_API_URL=http://localhost:9911/2.0/ \
   cargo run --release -- --size 800x480         # window; 1/2/3 = look, I = idle, Esc = quit
 curl -X POST localhost:9911/mode/stopped       # also: playing, noart, long
+# fake VinylVault shelf: add VINYLVAULT_SHELF=http://localhost:9911/shelf/test, then
+curl -X POST localhost:9911/finish/splatter    # marbled, swirl, galaxy, picture_disc, clear, …
 ```
 
 Other flags: `--snapshot out.png [--idle]` renders one frame to a file, `--bench` times

@@ -3,4 +3,5 @@
 
 pub mod ambient;
 pub mod poster;
+pub mod pressing;
 pub mod vinyl;

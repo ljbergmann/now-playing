@@ -15,6 +15,7 @@ mod frame;
 mod lastfm;
 mod scene;
 mod themes;
+mod vinylvault;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -38,6 +39,7 @@ enum Msg {
     Resize(usize, usize),
     Theme(Theme),
     ToggleIdlePreview,
+    ShelfUpdated,
 }
 
 struct Args {
@@ -62,6 +64,7 @@ fn parse_args() -> Result<Args, String> {
                      env: LASTFM_USER, LASTFM_API_KEY   (required)\n     \
                      THEME            vinyl (default), poster or ambient\n     \
                      CLOCK            24h (default) or 12h\n     \
+                     VINYLVAULT_SHELF your shared VinylVault shelf link or slug: draws your pressing\n     \
                      POLL_SECS        seconds between Last.fm checks (default 6)\n     \
                      ROTATE           0, 90, 180 or 270 (default: what the panel reports, else 0)\n     \
                      CONNECTOR        screen to use, e.g. HDMI-A-1 or DSI-1 (default: first connected)\n     \
@@ -155,14 +158,22 @@ fn run() -> Result<(), String> {
     lastfm::spawn(lastfm_config()?, move |u| tx.send(Msg::Lastfm(u)).is_ok());
 
     if let Some(path) = args.snapshot {
-        return snapshot(&fonts, &look, msg_rx, args.size.unwrap_or((800, 480)), args.idle, &path);
+        let shelf = match env("VINYLVAULT_SHELF") {
+            Some(s) => Some(vinylvault::load_once(&s)?),
+            None => None,
+        };
+        return snapshot(&fonts, &look, shelf.as_ref(), msg_rx, args.size.unwrap_or((800, 480)), args.idle, &path);
     }
+    let shelf = env("VINYLVAULT_SHELF").map(|s| {
+        let tx = msg_tx.clone();
+        vinylvault::spawn(&s, move || tx.send(Msg::ShelfUpdated).is_ok())
+    });
 
     let Some(mut display) = wait_for_display(&opts) else { return Ok(()) };
     let (mut w, mut h) = display.size();
 
     let (scene_tx, scene_rx) = mpsc::channel::<(Scene, bool)>();
-    thread::spawn(move || compose_loop(fonts, look, (w, h), msg_rx, scene_tx));
+    thread::spawn(move || compose_loop(fonts, look, shelf, (w, h), msg_rx, scene_tx));
 
     let mut comp = frame::Compositor::new(w, h);
     loop {
@@ -232,7 +243,14 @@ fn until_next_minute() -> Duration {
     Duration::from_millis(60_000 - ms % 60_000 + 50)
 }
 
-fn compose_loop(fonts: fonts::Fonts, mut look: Look, size: (usize, usize), rx: mpsc::Receiver<Msg>, tx: mpsc::Sender<(Scene, bool)>) {
+fn compose_loop(
+    fonts: fonts::Fonts,
+    mut look: Look,
+    shelf: Option<vinylvault::Shelf>,
+    size: (usize, usize),
+    rx: mpsc::Receiver<Msg>,
+    tx: mpsc::Sender<(Scene, bool)>,
+) {
     let (mut w, mut h) = size;
     let mut track: Option<Option<lastfm::Track>> = None; // None = no answer from Last.fm yet
     let mut error: Option<String> = None;
@@ -241,15 +259,20 @@ fn compose_loop(fonts: fonts::Fonts, mut look: Look, size: (usize, usize), rx: m
 
     loop {
         let idle = preview_idle || !track.as_ref().is_some_and(|t| t.as_ref().is_some_and(|t| t.playing));
+        let pressing = match (&shelf, &track) {
+            (Some(s), Some(Some(t))) => vinylvault::lookup(s, &t.album, &t.artist),
+            _ => None,
+        };
         let view = match &track {
             None => View::Connecting(error.as_deref()),
-            Some(t) => View::Track { track: t.as_ref(), idle },
+            Some(t) => View::Track { track: t.as_ref(), idle, pressing: pressing.as_ref() },
         };
         // Crossfade when what's shown changes in kind (song, playing/idle, theme);
         // swap instantly for small updates such as the clock ticking.
         let key = format!(
-            "{:?}|{idle}|{:?}",
+            "{:?}|{idle}|{:?}|{:?}",
             look.theme,
+            pressing.as_ref().map(|p| &p.name),
             track.as_ref().map(|t| t.as_ref().map(|t| (t.title.clone(), t.artist.clone(), t.album.clone())))
         );
         let fade = shown.as_ref().is_some_and(|s| *s != key);
@@ -279,6 +302,7 @@ fn compose_loop(fonts: fonts::Fonts, mut look: Look, size: (usize, usize), rx: m
             }
             Ok(Msg::Theme(t)) => look.theme = t,
             Ok(Msg::ToggleIdlePreview) => preview_idle = !preview_idle,
+            Ok(Msg::ShelfUpdated) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
@@ -288,6 +312,7 @@ fn compose_loop(fonts: fonts::Fonts, mut look: Look, size: (usize, usize), rx: m
 fn snapshot(
     fonts: &fonts::Fonts,
     look: &Look,
+    shelf: Option<&vinylvault::Shelf>,
     rx: mpsc::Receiver<Msg>,
     (w, h): (usize, usize),
     idle: bool,
@@ -303,7 +328,14 @@ fn snapshot(
         }
     };
     let idle = idle || !track.as_ref().is_some_and(|t| t.playing);
-    let view = View::Track { track: track.as_ref(), idle };
+    let pressing = match (shelf, &track) {
+        (Some(s), Some(t)) => vinylvault::lookup(s, &t.album, &t.artist),
+        _ => None,
+    };
+    if let Some(p) = &pressing {
+        println!("your pressing: {}", p.caption());
+    }
+    let view = View::Track { track: track.as_ref(), idle, pressing: pressing.as_ref() };
     let scene = scene::render(fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour);
     let pixels = still(&scene, w);
     let rgb: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
@@ -346,10 +378,24 @@ fn bench(fonts: &fonts::Fonts) {
     };
     println!("Per-frame budget at 60 fps: 16.7 ms. 'worst frame' = the most work any single frame does.");
     println!("{:<8} {:<10} {:>14} {:>13} {:>13}", "theme", "size", "render (bg)", "steady frame", "worst frame");
-    for theme in [Theme::Vinyl, Theme::Poster, Theme::Ambient] {
+    let marbled = vinylvault::Pressing {
+        name: "Red Marbled".into(),
+        finish: vinylvault::Finish::Marbled,
+        colors: vec![[204, 41, 46], [247, 247, 245]],
+        edition_size: Some(500),
+        is_limited: true,
+        is_numbered: false,
+    };
+    let cases = [
+        ("vinyl", Theme::Vinyl, None),
+        ("pressing", Theme::Vinyl, Some(&marbled)),
+        ("poster", Theme::Poster, None),
+        ("ambient", Theme::Ambient, None),
+    ];
+    for (label, theme, pressing) in cases {
         for (w, h) in [(480, 320), (800, 480), (1280, 720), (720, 1280)] {
             let t = Instant::now();
-            let view = View::Track { track: Some(&track), idle: false };
+            let view = View::Track { track: Some(&track), idle: false, pressing };
             let scene = scene::render(fonts, w, h, &view, SystemTime::now(), theme, false);
             let render_ms = t.elapsed().as_secs_f64() * 1000.0;
 
@@ -375,7 +421,7 @@ fn bench(fonts: &fonts::Fonts) {
             let worst_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
             println!(
                 "{:<8} {:<10} {:>11.0} ms {:>10.2} ms {:>10.2} ms",
-                format!("{theme:?}").to_lowercase(),
+                label,
                 format!("{w}x{h}"),
                 render_ms,
                 steady_ms,

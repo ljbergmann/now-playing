@@ -2,8 +2,9 @@
 //! Playing: the tonearm sits in the groove and the label turns at 33⅓ rpm.
 //! Idle: the arm rests, the record spins down, a big clock takes the text side.
 //!
-//! Only the label rotates per frame; grooves and highlights look the same at
-//! every angle, so they are drawn once here.
+//! A plain black record: only the label rotates per frame (grooves and
+//! highlights look the same at every angle). Your own coloured pressing from
+//! VinylVault: the whole record rotates under a fixed reflection/arm layer.
 
 use std::f32::consts::PI;
 
@@ -11,6 +12,8 @@ use tiny_skia::{Color, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::draw::{self, Align, DIM, FAINT, WHITE, clamp};
 use crate::scene::{Ctx, Extras, Item, Spinner, draw_stack, size_to_width, stack_height};
+use crate::themes::pressing;
+use crate::vinylvault::{Finish, Pressing};
 
 pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let (w, h) = (pm.width() as f32, pm.height() as f32);
@@ -41,18 +44,35 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     };
     let r = d / 2.0;
 
-    // Platter shadow, then the record itself.
+    // Platter shadow.
     if let Some(p) = disc(cx, cy + 0.02 * d, r * 1.01) {
         draw::fill(pm, &p, Color::from_rgba8(0, 0, 0, 120));
     }
-    draw_record(pm, cx, cy, r);
 
-    // Label = the cover, as a rotating disc.
-    let label_r = r * 0.34;
-    let mut spinner = label(art, cx, cy, label_r, pal.accent);
+    // The tonearm on its own layer: it must stay on top of a spinning record.
+    let mut arm = Pixmap::new(pm.width(), pm.height()).expect("non-zero size");
+    draw_tonearm(&mut arm, cx, cy, d, c.playing);
+
+    let mut spinner = match c.pressing {
+        // Your pressing: the whole record turns (a marble or splatter visibly
+        // rotates); reflections and arm sit on a fixed overlay.
+        Some(p) => {
+            let size = d.round() as usize;
+            let x = (cx - size as f32 / 2.0).round().max(0.0) as usize;
+            let y = (cy - size as f32 / 2.0).round().max(0.0) as usize;
+            let disc = pressing::disc(p, art, size, 0.34);
+            let strength = if p.finish == Finish::Clear { 0.5 } else { 0.3 };
+            let overlay = pressing::overlay(size, (x, y), &arm, strength);
+            Spinner { x, y, size, label: disc.texture, mask: disc.mask, overlay: Some(overlay), spinning: false }
+        }
+        // Plain black: grooves look the same at every angle, so only the label turns.
+        None => {
+            draw_record(pm, cx, cy, r);
+            label(art, cx, cy, r * 0.34, pal.accent)
+        }
+    };
     spinner.spinning = c.playing;
-
-    draw_tonearm(pm, cx, cy, d, c.playing);
+    pm.draw_pixmap(0, 0, arm.as_ref(), &Default::default(), Transform::identity(), None);
 
     // Text side.
     let (cx0, cw, top, bottom) = col;
@@ -69,6 +89,14 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
         items.push(Item::new(&f.regular, clamp(14.0, 4.2 * vmin, 40.0), t.artist.clone(), DIM).gap(0.2 * title_px));
         if !t.album.is_empty() {
             items.push(Item::new(&f.regular, clamp(11.0, 2.8 * vmin, 26.0), t.album.clone(), FAINT).gap(4.0));
+        }
+        if let Some(p) = c.pressing {
+            let tint = brightest(p).unwrap_or(pal.accent);
+            items.push(
+                Item::new(&f.bold, clamp(10.0, 2.2 * vmin, 18.0), format!("YOUR PRESSING · {}", p.caption().to_uppercase()), draw::rgba(tint, 1.0))
+                    .track(0.14)
+                    .gap(0.35 * title_px),
+            );
         }
     } else {
         let clk = draw::clock(c.now, c.twelve_hour);
@@ -87,6 +115,23 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let eq = draw_stack(pm, &items, (cx0, cw), y, align);
 
     Extras { eq, spinner: Some(spinner), ..Default::default() }
+}
+
+/// The pressing's most vivid colour, lifted so it reads on a dark background.
+/// Falls back to a light colour, then to the cover's accent (black/white records).
+fn brightest(p: &Pressing) -> Option<[u8; 3]> {
+    let lum = |c: &[u8; 3]| 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
+    let sat = |c: &[u8; 3]| {
+        let (mx, mn) = (*c.iter().max().unwrap() as f32, *c.iter().min().unwrap() as f32);
+        if mx > 0.0 { (mx - mn) / mx } else { 0.0 }
+    };
+    let c = p
+        .colors
+        .iter()
+        .filter(|c| lum(c) >= 40.0)
+        .max_by(|a, b| (sat(a) + lum(a) / 1000.0).total_cmp(&(sat(b) + lum(b) / 1000.0)))?;
+    let k = (150.0 / lum(c)).max(1.0);
+    Some(c.map(|v| (v as f32 * k).min(255.0) as u8))
 }
 
 fn disc(cx: f32, cy: f32, r: f32) -> Option<tiny_skia::Path> {
@@ -181,7 +226,7 @@ fn label(art: Option<&image::RgbaImage>, cx: f32, cy: f32, r: f32, accent: [u8; 
             label[j * size + i] = draw::xrgb(c.map(|v| v.clamp(0.0, 255.0) as u8));
         }
     }
-    Spinner { x, y, size, label, mask, spinning: false }
+    Spinner { x, y, size, label, mask, overlay: None, spinning: false }
 }
 
 /// Pivot top-right of the record; stylus in the groove when playing, on the

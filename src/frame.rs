@@ -111,11 +111,19 @@ pub fn draw_spinner(out: &mut [u32], under: &[u32], stride: usize, sp: &Spinner,
         let mut sy = ((-sin * dx0 + cos * dy + half - 0.5) * ONE) as i32;
         let row = (sp.y + j) * stride + sp.x;
         let mrow = &sp.mask[j * s..(j + 1) * s];
+        let orow = sp.overlay.as_ref().map(|o| &o[j * s..(j + 1) * s]);
         for (i, &m) in mrow.iter().enumerate() {
             if m != 0 {
                 let px = sample(&sp.label, s, sx.clamp(0, max), sy.clamp(0, max));
                 let o = row + i;
-                out[o] = if m == 255 && opacity == 256 { px } else { lerp(under[o], px, (m as u32 * opacity) >> 8) };
+                let mut v = if m == 255 && opacity == 256 { px } else { lerp(under[o], px, (m as u32 * opacity) >> 8) };
+                if let Some(ov) = orow {
+                    let a = ov[i] >> 24;
+                    if a != 0 {
+                        v = lerp(v, ov[i] & 0x00FF_FFFF, a + (a >> 7)); // 255 → 256
+                    }
+                }
+                out[o] = v;
             }
             sx += c;
             sy -= sn;
@@ -277,7 +285,7 @@ mod tests {
     fn spinner(size: usize) -> Spinner {
         // Left half red, right half blue.
         let label = (0..size * size).map(|i| if i % size < size / 2 { 0x00FF_0000 } else { 0x0000_00FF }).collect();
-        Spinner { x: 0, y: 0, size, label, mask: vec![255; size * size], spinning: true }
+        Spinner { x: 0, y: 0, size, label, mask: vec![255; size * size], overlay: None, spinning: true }
     }
 
     #[test]
