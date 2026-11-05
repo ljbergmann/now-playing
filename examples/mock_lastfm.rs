@@ -68,6 +68,12 @@ fn main() {
             let _ = req.respond(Response::from_string(finish.clone()));
             continue;
         }
+        // "Connect with Last.fm": any token with a signature logs in as "mockuser".
+        if url.contains("method=auth.getSession") {
+            let body = if url.contains("api_sig=") { r#"{"session":{"name":"mockuser","key":"k","subscriber":0}}"# } else { r#"{"error":13,"message":"Invalid method signature supplied"}"# };
+            let _ = req.respond(Response::from_string(body));
+            continue;
+        }
         if url.starts_with("/shelf/") && url.ends_with(".json") {
             let (name, hexes) = match finish.as_str() {
                 "solid" => ("Translucent Blue", r##"["#3D70D6"]"##),

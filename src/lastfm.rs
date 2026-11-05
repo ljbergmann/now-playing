@@ -491,8 +491,53 @@ pub fn check(cfg: &Config) -> Result<Option<Track>, String> {
     parse(&String::from_utf8(body).map_err(|e| e.to_string())?)
 }
 
+// --- "Connect with Last.fm" ------------------------------------------------
+// Last.fm's web login: send the browser to `auth_url`, Last.fm sends it back
+// with a token, and `session_user` swaps that for the account name. Needs the
+// app's key and secret (built in, like the key; see `builtin_key`).
+
+pub fn builtin_secret() -> Option<&'static str> {
+    option_env!("LASTFM_APP_SECRET").map(str::trim).filter(|k| !k.is_empty())
+}
+
+pub fn auth_url(api_key: &str, back_to: &str) -> String {
+    format!("https://www.last.fm/api/auth/?api_key={}&cb={}", encode(api_key), encode(back_to))
+}
+
+/// Last.fm's request signature: parameters sorted by name, name+value
+/// concatenated, then the secret, MD5 as hex. `format` is never signed.
+fn signature(params: &[(&str, &str)], secret: &str) -> String {
+    let mut p = params.to_vec();
+    p.sort();
+    let mut s: String = p.iter().map(|(k, v)| format!("{k}{v}")).collect();
+    s.push_str(secret);
+    format!("{:x}", md5::compute(s.as_bytes()))
+}
+
+/// The user name that approved the login. The session key itself isn't
+/// kept: reading what someone plays needs only their name.
+pub fn session_user(api_url: &str, api_key: &str, secret: &str, token: &str) -> Result<String, String> {
+    let params = [("api_key", api_key), ("method", "auth.getSession"), ("token", token)];
+    let url = format!(
+        "{api_url}?method=auth.getSession&api_key={}&token={}&api_sig={}&format=json",
+        encode(api_key),
+        encode(token),
+        signature(&params, secret)
+    );
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(8)).user_agent("now-playing-display/0.1").build();
+    let body = get(&agent, &url)?;
+    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    v["session"]["name"].as_str().filter(|n| !n.is_empty()).map(String::from).ok_or_else(|| "Last.fm didn't confirm the login.".into())
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn signature_sorts_and_appends_secret() {
+        let p = [("token", "t"), ("method", "auth.getSession"), ("api_key", "k")];
+        assert_eq!(super::signature(&p, "s"), "4b1fe62eb056c03672443be528ff2633");
+    }
     use super::*;
 
     #[test]

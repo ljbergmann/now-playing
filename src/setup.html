@@ -26,6 +26,8 @@
   .seg input:checked + span { border-color:var(--accent); color:var(--accent); background:#ff7a4514; }
   .seg input:focus-visible + span { outline:2px solid var(--accent); }
   button { width:100%; padding:14px; font-size:16px; font-weight:600; border:0; border-radius:12px; cursor:pointer; background:var(--accent); color:#1a0d06; margin-top:6px; }
+  a.connect { display:block; text-align:center; text-decoration:none; padding:14px; font-weight:600; border-radius:12px; background:#d51007; color:#fff; }
+  .or { text-align:center; color:var(--dim); font-size:13px; margin:14px 0 2px; }
   button.quiet { background:transparent; color:var(--dim); border:1px solid var(--line); font-weight:500; }
   button:disabled { opacity:.6; }
   #msg { min-height:22px; margin:12px 2px 4px; font-size:15px; }
@@ -41,6 +43,10 @@
 
     <section>
       <h2>Last.fm</h2>
+      <div id="connectbox" hidden>
+        <a class="connect" href="connect">Connect with Last.fm</a>
+        <p class="or">or type your user name</p>
+      </div>
       <label for="user">Your Last.fm user name</label>
       <input id="user" name="user" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
       <div id="keybox">
@@ -86,6 +92,11 @@ fetch('state').then(r => r.json()).then(s => {
   f.theme.value = s.theme; f.clock.value = s.clock;
   if (s.has_key) { f.key.placeholder = 'saved — leave empty to keep'; }
   if (s.builtin_key && !s.has_key) document.getElementById('keybox').hidden = true;
+  if (s.connect) document.getElementById('connectbox').hidden = false;
+  const q = location.search;
+  if (q.includes('connected') && s.user) say('Connected as ' + s.user + '. It shows up on the display now.', 'ok');
+  if (q.includes('login-failed')) say('Last.fm didn’t confirm the login. Try again, or type your user name.', 'bad');
+  if (q) history.replaceState(null, '', location.pathname);
   connected = !!(s.user && (s.has_key || s.builtin_key));
 });
 

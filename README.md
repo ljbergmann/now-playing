@@ -75,7 +75,9 @@ NEON-vectorised on the Pi) and redraws the tiny equalizer region.
 Release builds carry the app's own Last.fm API key, so people only enter their
 user name. It's read from `~/.config/now-playing/build.env`
 (`LASTFM_APP_KEY=…`, register at https://www.last.fm/api/account/create) and
-never stored in the repo. Without it, the setup page also asks for a key.
+never stored in the repo. Without it, the setup page also asks for a key. With
+`LASTFM_APP_SECRET=…` as well, the page offers "Connect with Last.fm": people
+tap Allow on Last.fm instead of typing their name.
 
 | Board | OS | Binary |
 |---|---|---|

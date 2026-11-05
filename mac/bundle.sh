@@ -8,12 +8,15 @@ cd "$(dirname "$0")/.."
 # The app's Last.fm key (so users only need their user name). Kept outside
 # the repo; builds without it ask users for their own key.
 BUILD_ENV="${NP_BUILD_ENV:-$HOME/.config/now-playing/build.env}"
+# With the secret too, the setup page offers "Connect with Last.fm".
 LASTFM_APP_KEY=""
+LASTFM_APP_SECRET=""
 if [[ -f "$BUILD_ENV" ]]; then
   LASTFM_APP_KEY=$(sed -n 's/^LASTFM_APP_KEY=//p' "$BUILD_ENV" | head -1)
+  LASTFM_APP_SECRET=$(sed -n 's/^LASTFM_APP_SECRET=//p' "$BUILD_ENV" | head -1)
 fi
-export LASTFM_APP_KEY
-echo "Last.fm app key: $([[ -n $LASTFM_APP_KEY ]] && echo built in || echo none, users enter their own)"
+export LASTFM_APP_KEY LASTFM_APP_SECRET
+echo "Last.fm app key: $([[ -n $LASTFM_APP_KEY ]] && echo built in || echo none, users enter their own)$([[ -n $LASTFM_APP_SECRET ]] && echo ', with Connect with Last.fm')"
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 APP="dist/Now Playing.app"

@@ -102,7 +102,10 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
             }
             Err(_) => return,
         };
-        let url = req.url().split('?').next().unwrap_or("").to_string();
+        let (url, query) = match req.url().split_once('?') {
+            Some((u, q)) => (u.to_string(), q.to_string()),
+            None => (req.url().to_string(), String::new()),
+        };
         let Some(path) = url.strip_prefix(&base) else {
             let _ = req.respond(Response::from_string("Not found").with_status_code(404));
             continue;
@@ -138,6 +141,37 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
                 };
                 let _ = req.respond(json(&reply));
             }
+            // "Connect with Last.fm": off to Last.fm, which sends the browser
+            // back to /back with a token.
+            (Method::Get, "/connect") => {
+                let back = host(&req).map(|h| format!("http://{h}{base}/back"));
+                let reply = match (lastfm::builtin_key(), lastfm::builtin_secret(), back) {
+                    (Some(key), Some(_), Some(back)) => Response::empty(302).with_header(header("Location", &lastfm::auth_url(key, &back))),
+                    _ => Response::empty(404),
+                };
+                let _ = req.respond(reply);
+            }
+            (Method::Get, "/back") => {
+                let token = query.split('&').find_map(|kv| kv.strip_prefix("token=")).unwrap_or("");
+                let result = match (lastfm::builtin_key(), lastfm::builtin_secret()) {
+                    (Some(key), Some(secret)) if !token.is_empty() && token.len() < 128 => {
+                        let api = settings::get("LASTFM_API_URL").unwrap_or_else(|| lastfm::API_URL.into());
+                        lastfm::session_user(&api, key, secret, token).and_then(|name| settings::save(&[("LASTFM_USER", Some(&name))]))
+                    }
+                    _ => Err("no login".into()),
+                };
+                let to = match result {
+                    Ok(()) => {
+                        on_event(Event::Saved);
+                        format!("{base}/?connected")
+                    }
+                    Err(e) => {
+                        eprintln!("Last.fm login failed: {e}");
+                        format!("{base}/?login-failed")
+                    }
+                };
+                let _ = req.respond(Response::empty(302).with_header(header("Location", &to)));
+            }
             (Method::Post, "/done") => {
                 let _ = req.respond(json(&serde_json::json!({ "ok": true })));
                 return;
@@ -147,6 +181,14 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
             }
         }
     }
+}
+
+/// The address the browser used to reach us (so Last.fm can send it back
+/// there), if it looks like a plain host[:port].
+fn host(req: &tiny_http::Request) -> Option<String> {
+    let h = req.headers().iter().find(|h| h.field.equiv("Host"))?.value.as_str().to_string();
+    let ok = !h.is_empty() && h.len() < 100 && h.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b));
+    ok.then_some(h)
 }
 
 fn header(k: &str, v: &str) -> Header {
@@ -165,6 +207,7 @@ fn state() -> serde_json::Value {
         "user": settings::get("LASTFM_USER").unwrap_or_default(),
         "has_key": settings::get("LASTFM_API_KEY").is_some(),
         "builtin_key": lastfm::builtin_key().is_some(),
+        "connect": lastfm::builtin_key().is_some() && lastfm::builtin_secret().is_some(),
         "shelf": settings::get("VINYLVAULT_SHELF").unwrap_or_default(),
         "theme": settings::get("THEME").unwrap_or_else(|| "vinyl".into()),
         "clock": settings::get("CLOCK").unwrap_or_else(|| "24h".into()),
