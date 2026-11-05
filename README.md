@@ -124,6 +124,7 @@ or edit `/etc/now-playing/env` and `sudo systemctl restart now-playing`:
 | `CLOCK` | `24h` (default) or `12h` |
 | `VINYLVAULT_SHELF` | your shared VinylVault shelf link or slug (optional) |
 | `VINYLVAULT_CATALOGUE` | `on` (default) or `off`: catalogue pressings for albums not on your shelf |
+| `PROMO` | `on` (default) or `off`: the small VinylVault mark on the clock screen and "via VinylVault" under pressings |
 | `ROTATE` | `0`, `90`, `180`, `270` (clockwise), or `auto` (default) |
 | `CONNECTOR` | e.g. `HDMI-A-1`, `DSI-1` (default: first connected screen) |
 

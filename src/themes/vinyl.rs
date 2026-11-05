@@ -97,6 +97,10 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
                     .track(0.14)
                     .gap(0.35 * title_px),
             );
+            if c.promo {
+                let via = if p.owned { "VIA YOUR VINYLVAULT SHELF" } else { "VIA VINYLVAULT" };
+                items.push(Item::new(&f.bold, clamp(9.0, 1.7 * vmin, 14.0), via, FAINT).track(0.16).gap(2.0));
+            }
         }
     } else {
         let clk = draw::clock(c.now, c.twelve_hour);

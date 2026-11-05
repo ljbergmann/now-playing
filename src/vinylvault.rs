@@ -242,8 +242,10 @@ struct SearchItem {
 
 /// Raw search text: main artist + album without bracketed noise.
 fn search_query(album: &str, artist: &str) -> String {
+    // Search and slice the *same* string: lowercasing can change byte lengths
+    // ("İ" is 2 bytes, "i̇" is 3), so an index into `lower` isn't safe on `artist`.
     let lower = artist.to_lowercase();
-    let end = [",", " & ", " feat", " ft.", " x ", " with "].iter().filter_map(|m| lower.find(m)).min().unwrap_or(artist.len());
+    let end = [",", " & ", " feat", " ft.", " x ", " with "].iter().filter_map(|m| lower.find(m)).min().unwrap_or(lower.len());
     let mut title = String::new();
     let mut depth = 0;
     for c in album.chars() {
@@ -254,7 +256,7 @@ fn search_query(album: &str, artist: &str) -> String {
             _ => {}
         }
     }
-    format!("{} {}", artist[..end].trim(), title.trim())
+    format!("{} {}", lower[..end].trim(), title.trim())
 }
 
 /// Picks a pressing of exactly this album from search results. Strict on both
@@ -511,7 +513,10 @@ mod tests {
 
     #[test]
     fn query_and_base() {
-        assert_eq!(search_query("Sabotage (Deluxe) [2024]", "Bebe Rexha, YEJI"), "Bebe Rexha Sabotage");
+        assert_eq!(search_query("Sabotage (Deluxe) [2024]", "Bebe Rexha, YEJI"), "bebe rexha Sabotage");
+        // Must not panic when lowercasing changes byte lengths.
+        assert_eq!(search_query("Album", "İİİ & Friends"), "i\u{307}i\u{307}i\u{307} Album");
+        let _ = primary_artist("İİİ, x");
         assert_eq!(base_url(Some("https://vv.example/shelf/ab12")), "https://vv.example");
         assert_eq!(base_url(Some("ab12")), DEFAULT_BASE);
         assert_eq!(base_url(None), DEFAULT_BASE);

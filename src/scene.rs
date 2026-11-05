@@ -93,6 +93,8 @@ pub struct Ctx<'a> {
     pub playing: bool,
     pub pressing: Option<&'a Pressing>,
     pub now: SystemTime,
+    /// Show the small VinylVault mentions (PROMO=off hides them).
+    pub promo: bool,
     pub twelve_hour: bool,
 }
 
@@ -105,7 +107,7 @@ pub struct Extras {
     pub drift_period: f32,
 }
 
-pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, theme: Theme, twelve_hour: bool) -> Scene {
+pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, theme: Theme, twelve_hour: bool, promo: bool) -> Scene {
     let mut pm = Pixmap::new(w as u32, h as u32).expect("non-zero size");
     pm.fill(draw::color([11, 11, 13]));
 
@@ -126,12 +128,19 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
                 }
                 other => *other,
             };
-            let ctx = Ctx { fonts, track, playing: !idle, pressing: *pressing, now, twelve_hour };
-            match theme {
+            let ctx = Ctx { fonts, track, playing: !idle, pressing: *pressing, now, twelve_hour, promo };
+            let mut extras = match theme {
                 Theme::Vinyl => themes::vinyl::render(&mut pm, &ctx),
                 Theme::Poster => themes::poster::render(&mut pm, &ctx),
                 Theme::Ambient => themes::ambient::render(&mut pm, &ctx),
+            };
+            if *idle && promo {
+                brand(&mut pm, fonts);
+                if let Some(alt) = extras.alt.as_mut() {
+                    brand(alt, fonts);
+                }
             }
+            extras
         }
     };
 
@@ -149,6 +158,43 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
         eq: extras.eq,
         spinner: extras.spinner,
     }
+}
+
+/// A small, quiet VinylVault mark for the clock screen: a record icon, the
+/// name and a tagline, tucked into the bottom-right corner.
+fn brand(pm: &mut Pixmap, fonts: &Fonts) {
+    let (w, h) = (pm.width() as f32, pm.height() as f32);
+    let vmin = w.min(h) / 100.0;
+    let pad = draw::clamp(12.0, 4.5 * vmin, 52.0);
+    let px = draw::clamp(10.0, 2.3 * vmin, 20.0);
+    let small = px * 0.8;
+    let (name, tag) = ("VinylVault", "your records, every pressing");
+    let name_w = draw::text_width(&fonts.bold, px, name, 0.02 * px);
+    let tag_w = draw::text_width(&fonts.regular, small, tag, 0.0);
+    let block_h = draw::line_h(px) + draw::line_h(small) - 0.15 * px;
+    let icon = block_h * 0.9;
+    let gap = 0.5 * px;
+    let right = w - pad;
+    let top = h - pad - block_h;
+    let text_x = right - name_w.max(tag_w);
+    // Record icon: disc, label, spindle hole.
+    let (cx, cy, r) = (text_x - gap - icon / 2.0, top + block_h / 2.0, icon / 2.0);
+    let circle = |r: f32| {
+        let mut pb = tiny_skia::PathBuilder::new();
+        pb.push_circle(cx, cy, r);
+        pb.finish()
+    };
+    if let Some(p) = circle(r) {
+        draw::fill(pm, &p, tiny_skia::Color::from_rgba8(255, 255, 255, 120));
+    }
+    if let Some(p) = circle(r * 0.4) {
+        draw::fill(pm, &p, tiny_skia::Color::from_rgba8(0, 0, 0, 150));
+    }
+    if let Some(p) = circle(r * 0.08) {
+        draw::fill(pm, &p, tiny_skia::Color::from_rgba8(255, 255, 255, 140));
+    }
+    draw::draw_text(pm, &fonts.bold, px, text_x, top, name, [1.0, 1.0, 1.0, 0.62], 0.02 * px);
+    draw::draw_text(pm, &fonts.regular, small, text_x, top + draw::line_h(px) - 0.15 * px, tag, [1.0, 1.0, 1.0, 0.4], 0.0);
 }
 
 fn connecting(pm: &mut Pixmap, fonts: &Fonts, sub: &str) {

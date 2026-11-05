@@ -66,6 +66,7 @@ fn parse_args() -> Result<Args, String> {
                      CLOCK            24h (default) or 12h\n     \
                      VINYLVAULT_SHELF your shared VinylVault shelf link or slug: draws your pressing\n     \
                      VINYLVAULT_CATALOGUE  on (default) or off: else draw a real pressing of the album\n     \
+                     PROMO            on (default) or off: the small VinylVault mentions\n     \
                      POLL_SECS        seconds between Last.fm checks (default 6)\n     \
                      ROTATE           0, 90, 180 or 270 (default: what the panel reports, else 0)\n     \
                      CONNECTOR        screen to use, e.g. HDMI-A-1 or DSI-1 (default: first connected)\n     \
@@ -117,6 +118,7 @@ fn display_options(size: Option<(usize, usize)>) -> Result<display::Options, Str
 struct Look {
     theme: Theme,
     twelve_hour: bool,
+    promo: bool,
 }
 
 fn look() -> Result<Look, String> {
@@ -129,7 +131,8 @@ fn look() -> Result<Look, String> {
         Some("12h") | Some("12") => true,
         Some(v) => return Err(format!("CLOCK must be 24h or 12h (got {v})")),
     };
-    Ok(Look { theme, twelve_hour })
+    let promo = !matches!(env("PROMO").as_deref(), Some("off" | "0" | "false" | "no"));
+    Ok(Look { theme, twelve_hour, promo })
 }
 
 fn main() {
@@ -304,7 +307,7 @@ fn compose_loop(
         let fade = shown.as_ref().is_some_and(|s| *s != key);
         shown = Some(key);
 
-        let scene = scene::render(&fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour);
+        let scene = scene::render(&fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour, look.promo);
         if tx.send((scene, fade)).is_err() {
             return;
         }
@@ -359,7 +362,7 @@ fn snapshot(
         println!("{} pressing: {}", if p.owned { "your" } else { "catalogue" }, p.caption());
     }
     let view = View::Track { track: track.as_ref(), idle, pressing: pressing.as_ref() };
-    let scene = scene::render(fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour);
+    let scene = scene::render(fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour, look.promo);
     let pixels = still(&scene, w);
     let rgb: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
     image::save_buffer(path, &rgb, w as u32, h as u32, image::ColorType::Rgb8).map_err(|e| e.to_string())?;
@@ -420,7 +423,7 @@ fn bench(fonts: &fonts::Fonts) {
         for (w, h) in [(480, 320), (800, 480), (1280, 720), (720, 1280)] {
             let t = Instant::now();
             let view = View::Track { track: Some(&track), idle: false, pressing };
-            let scene = scene::render(fonts, w, h, &view, SystemTime::now(), theme, false);
+            let scene = scene::render(fonts, w, h, &view, SystemTime::now(), theme, false, true);
             let render_ms = t.elapsed().as_secs_f64() * 1000.0;
 
             // Steady state: whatever the theme animates every frame.
@@ -435,7 +438,7 @@ fn bench(fonts: &fonts::Fonts) {
             let steady_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
 
             // Worst case: a crossfade frame (full blend + overlays).
-            let scene2 = scene::render(fonts, w, h, &view, SystemTime::now(), theme, false);
+            let scene2 = scene::render(fonts, w, h, &view, SystemTime::now(), theme, false, true);
             comp.set_scene(scene2, true);
             let n = 30;
             let t = Instant::now();
