@@ -168,8 +168,10 @@ LASTFM_API_KEY=
         Some(PathBuf::from(home).join("Library/Application Support/Now Playing/settings"))
     }
 
+    /// Opened from Finder/Dock/`open`: macOS starts the app itself (parent is
+    /// launchd), with no terminal. Scripts and terminals never get dialogs.
     fn from_finder() -> bool {
-        cfg!(target_os = "macos") && unsafe { libc::isatty(2) } == 0
+        cfg!(target_os = "macos") && unsafe { libc::getppid() == 1 && libc::isatty(2) == 0 }
     }
 
     /// Fill in settings that aren't already set in the environment.

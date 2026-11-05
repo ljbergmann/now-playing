@@ -80,16 +80,49 @@ fn palette(p: &Pressing) -> Vec<C> {
     cs
 }
 
+/// VinylVault's colour for clear plastic.
+const CLEAR: C = [224.0, 234.0, 240.0];
+
+fn dist(a: C, b: C) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// Which palette colour is clear plastic, if any. The catalogue files e.g.
+/// "Clear With Orange Splatter" under splatter, so look at the name too.
+fn clear_color(p: &Pressing, cs: &[C]) -> Option<C> {
+    if p.finish == Finish::PictureDisc {
+        return None;
+    }
+    let name = p.name.to_lowercase();
+    let named = ["clear", "transparent", "translucent", "crystal"].iter().any(|w| name.contains(w));
+    if p.finish != Finish::Clear && !named {
+        return None;
+    }
+    let near = cs.iter().copied().min_by(|a, b| dist(*a, CLEAR).total_cmp(&dist(*b, CLEAR)));
+    match near {
+        Some(c) if dist(c, CLEAR) < 48.0 => Some(c),
+        _ if p.finish == Finish::Clear => cs.first().copied(),
+        _ => None,
+    }
+}
 
 pub struct Disc {
+    /// Colour; for clear vinyl the top byte is how solid the plastic is there.
     pub texture: Vec<u32>,
+    /// The round shape (edge and label), fixed on screen.
     pub mask: Vec<u8>,
+    pub texture_alpha: bool,
 }
 
 /// The whole record as a size×size texture: pattern, grooves, rim, label, hole.
 pub fn disc(p: &Pressing, art: Option<&RgbaImage>, size: usize, label_frac: f32) -> Disc {
     let seed = p.name.bytes().fold(2_166_136_261u32, |h, b| (h ^ b as u32).wrapping_mul(16_777_619));
     let cs = palette(p);
+    // Clear plastic: how far each colour is from it decides how solid it looks.
+    let clear = clear_color(p, &cs);
+    let clear_span = clear
+        .map(|k| cs.iter().map(|c| dist(*c, k)).fold(0.0f32, f32::max).max(1.0))
+        .unwrap_or(1.0);
     let half = size as f32 / 2.0;
     // The full-size cover is only printed on a picture disc; don't scale it otherwise.
     let cover = art.filter(|_| p.finish == Finish::PictureDisc).map(|a| draw::square(a, size as u32));
@@ -107,9 +140,10 @@ pub fn disc(p: &Pressing, art: Option<&RgbaImage>, size: usize, label_frac: f32)
         .collect();
 
     let _p = draw::Prof::new("pressing disc");
-    // Colour in the low 24 bits, coverage in the top 8, split up at the end.
-    let mut argb = vec![0u32; size * size];
-    draw::par_rows(&mut argb, size, |j, row| {
+    // Per pixel: colour with the plastic's opacity in the top byte (turns
+    // with the record), and the round shape's coverage (stays put).
+    let mut px = vec![(0u32, 0u8); size * size];
+    draw::par_rows(&mut px, size, |j, row| {
         for i in 0..size {
             let (dx, dy) = (i as f32 + 0.5 - half, j as f32 + 0.5 - half);
             let d = (dx * dx + dy * dy).sqrt();
@@ -174,8 +208,10 @@ pub fn disc(p: &Pressing, art: Option<&RgbaImage>, size: usize, label_frac: f32)
                 Finish::Clear => 0.10,
                 _ => 0.06,
             };
+            // 0 where the plastic is clear, 1 where it is coloured.
+            let solid = clear.map_or(1.0, |k| (dist(c, k) / clear_span * 1.6).clamp(0.0, 1.0));
             let mut shade = 1.0;
-            if grooved && p.finish == Finish::Clear {
+            if grooved && solid < 0.5 {
                 // Clear vinyl: grooves catch light rather than darken.
                 shade += 0.25 * (0.5 + 0.5 * (d * 2.1).sin());
             } else if grooved {
@@ -192,11 +228,14 @@ pub fn disc(p: &Pressing, art: Option<&RgbaImage>, size: usize, label_frac: f32)
             c = c.map(|x| x * shade);
 
             // 3. Label + spindle hole (a picture disc has no separate label).
-            let mut alpha = cov;
-            if p.finish == Finish::Clear && rn > label_frac {
-                // Mostly see-through; the rounded edge and track gaps show more.
+            let alpha = cov;
+            let mut opacity = 1.0f32;
+            if clear.is_some() && rn > label_frac {
+                // Clear parts are mostly see-through; the rounded edge and
+                // track gaps show more. Coloured parts (splats, swirls) stay solid.
                 let gap = [0.52, 0.64, 0.75, 0.86].iter().any(|g| (rn - g).abs() < 0.006);
-                alpha *= if rn >= 0.965 { 0.6 } else if gap { 0.22 } else { 0.07 + 0.07 * (0.5 + 0.5 * (d * 2.1).sin()) };
+                let see = if rn >= 0.965 { 0.6 } else if gap { 0.22 } else { 0.07 + 0.07 * (0.5 + 0.5 * (d * 2.1).sin()) };
+                opacity = see + (1.0 - see) * solid;
             }
             if p.finish != Finish::PictureDisc && rn <= label_frac {
                 if let Some(l) = &label {
@@ -207,18 +246,21 @@ pub fn disc(p: &Pressing, art: Option<&RgbaImage>, size: usize, label_frac: f32)
                     let lc = [px[0] as f32, px[1] as f32, px[2] as f32].map(|x| x * (1.0 - 0.35 * edge));
                     let lcov = (label_frac * half - d + 0.5).clamp(0.0, 1.0);
                     c = mix(c, lc, lcov);
-                    alpha = alpha.max(lcov);
+                    opacity += (1.0 - opacity) * lcov;
                 }
             }
             let hole = (label_frac * half * 0.075 - d + 0.5).clamp(0.0, 1.0);
             c = mix(c, [6.0, 6.0, 6.0], hole);
 
-            row[i] = ((alpha * 255.0) as u32) << 24 | draw::xrgb(c.map(|x| x.clamp(0.0, 255.0) as u8));
+            let a = ((opacity * 255.0).round() as u32) << 24;
+            row[i] = (a | draw::xrgb(c.map(|x| x.clamp(0.0, 255.0) as u8)), (alpha * 255.0) as u8);
         }
     });
+    let texture_alpha = clear.is_some();
     Disc {
-        texture: argb.iter().map(|v| v & 0x00FF_FFFF).collect(),
-        mask: argb.iter().map(|v| (v >> 24) as u8).collect(),
+        texture: px.iter().map(|v| if texture_alpha { v.0 } else { v.0 & 0x00FF_FFFF }).collect(),
+        mask: px.iter().map(|v| v.1).collect(),
+        texture_alpha,
     }
 }
 

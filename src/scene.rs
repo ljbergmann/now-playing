@@ -50,10 +50,14 @@ pub struct Spinner {
     pub x: usize,
     pub y: usize,
     pub size: usize,
-    /// size×size 0RGB texture (unrotated).
+    /// size×size texture (unrotated). 0RGB, or ARGB when `texture_alpha`.
     pub label: Vec<u32>,
-    /// size×size coverage (anti-aliased circle edge; partial for clear vinyl).
+    /// size×size coverage of the round shape (anti-aliased edges). Fixed on
+    /// screen, so it must be the same at every angle.
     pub mask: Vec<u8>,
+    /// The texture's top byte is an opacity that turns with it (clear
+    /// vinyl with splatter, swirls, ...), multiplied with `mask`.
+    pub texture_alpha: bool,
     /// Optional size×size ARGB layer that stays put on top of the rotating
     /// texture: light reflections, the tonearm and its shadow.
     pub overlay: Option<Vec<u32>>,

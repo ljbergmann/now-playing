@@ -80,13 +80,21 @@ pub fn spinner_rect(sp: &Spinner) -> Rect {
 }
 
 #[inline(always)]
-fn sample(tex: &[u32], s: usize, fx: i32, fy: i32) -> u32 {
+/// `lerp` that keeps the top (alpha) byte too.
+fn lerp4(a: u32, b: u32, t: u32) -> u32 {
+    let it = 256 - t;
+    let rb = ((a & 0x00FF_00FF) * it + (b & 0x00FF_00FF) * t) >> 8 & 0x00FF_00FF;
+    let ag = ((a >> 8 & 0x00FF_00FF) * it + (b >> 8 & 0x00FF_00FF) * t) & 0xFF00_FF00;
+    rb | ag
+}
+
+fn sample(tex: &[u32], s: usize, fx: i32, fy: i32, mix: fn(u32, u32, u32) -> u32) -> u32 {
     let (x0, y0) = ((fx >> 16) as usize, (fy >> 16) as usize);
     let (x1, y1) = ((x0 + 1).min(s - 1), (y0 + 1).min(s - 1));
     let (tx, ty) = (((fx >> 8) & 0xFF) as u32, ((fy >> 8) & 0xFF) as u32);
-    let top = lerp(tex[y0 * s + x0], tex[y0 * s + x1], tx);
-    let bot = lerp(tex[y1 * s + x0], tex[y1 * s + x1], tx);
-    lerp(top, bot, ty)
+    let top = mix(tex[y0 * s + x0], tex[y0 * s + x1], tx);
+    let bot = mix(tex[y1 * s + x0], tex[y1 * s + x1], tx);
+    mix(top, bot, ty)
 }
 
 /// Draws the spinner's texture rotated clockwise by `angle` (radians), with
@@ -103,6 +111,7 @@ pub fn draw_spinner(out: &mut [u32], under: &[u32], stride: usize, sp: &Spinner,
     let (c, sn) = ((cos * ONE) as i32, (sin * ONE) as i32);
     let max = ((s - 1) as i32) << 16;
     let opacity = opacity.min(256);
+    let mix: fn(u32, u32, u32) -> u32 = if sp.texture_alpha { lerp4 } else { lerp };
     for j in 0..s {
         let dy = j as f32 + 0.5 - half;
         let dx0 = 0.5 - half;
@@ -114,9 +123,14 @@ pub fn draw_spinner(out: &mut [u32], under: &[u32], stride: usize, sp: &Spinner,
         let orow = sp.overlay.as_ref().map(|o| &o[j * s..(j + 1) * s]);
         for (i, &m) in mrow.iter().enumerate() {
             if m != 0 {
-                let px = sample(&sp.label, s, sx.clamp(0, max), sy.clamp(0, max));
+                let mut px = sample(&sp.label, s, sx.clamp(0, max), sy.clamp(0, max), mix);
+                let mut m = m as u32;
+                if sp.texture_alpha {
+                    m = m * (px >> 24) / 255;
+                    px &= 0x00FF_FFFF;
+                }
                 let o = row + i;
-                let mut v = if m == 255 && opacity == 256 { px } else { lerp(under[o], px, (m as u32 * opacity) >> 8) };
+                let mut v = if m == 255 && opacity == 256 { px } else { lerp(under[o], px, (m * opacity) >> 8) };
                 if let Some(ov) = orow {
                     let a = ov[i] >> 24;
                     if a != 0 {
@@ -285,7 +299,7 @@ mod tests {
     fn spinner(size: usize) -> Spinner {
         // Left half red, right half blue.
         let label = (0..size * size).map(|i| if i % size < size / 2 { 0x00FF_0000 } else { 0x0000_00FF }).collect();
-        Spinner { x: 0, y: 0, size, label, mask: vec![255; size * size], overlay: None, spinning: true }
+        Spinner { x: 0, y: 0, size, label, mask: vec![255; size * size], overlay: None, spinning: true, texture_alpha: false }
     }
 
     #[test]
@@ -310,5 +324,24 @@ mod tests {
         draw_spinner(&mut out, &under, 8, &sp, std::f32::consts::FRAC_PI_2, 256);
         assert_eq!(out[1 * 8 + 4], 0x00FF_0000, "top should be red");
         assert_eq!(out[6 * 8 + 4], 0x0000_00FF, "bottom should be blue");
+    }
+
+    #[test]
+    fn texture_opacity_turns_with_the_record() {
+        // Left half solid red, right half fully see-through: after a half
+        // turn the solid part must be on the right, not stay on the left.
+        let mut sp = spinner(8);
+        sp.texture_alpha = true;
+        for (i, v) in sp.label.iter_mut().enumerate() {
+            *v = if i % 8 < 4 { 0xFFFF_0000 } else { 0x0000_00FF };
+        }
+        let under = vec![0x0000_FF00u32; 64];
+        let mut out = vec![0u32; 64];
+        draw_spinner(&mut out, &under, 8, &sp, 0.0, 256);
+        assert_eq!(out[3 * 8 + 1], 0x00FF_0000);
+        assert_eq!(out[3 * 8 + 6], 0x0000_FF00, "see-through shows what's under");
+        draw_spinner(&mut out, &under, 8, &sp, std::f32::consts::PI, 256);
+        assert_eq!(out[3 * 8 + 1], 0x0000_FF00);
+        assert_eq!(out[3 * 8 + 6], 0x00FF_0000);
     }
 }

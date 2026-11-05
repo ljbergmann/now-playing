@@ -67,7 +67,7 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
             let disc = pressing::disc(p, art, size, 0.34);
             let strength = if p.finish == Finish::Clear { 0.5 } else { 0.3 };
             let overlay = pressing::overlay(size, (x, y), &arm, strength);
-            Spinner { x, y, size, label: disc.texture, mask: disc.mask, overlay: Some(overlay), spinning: false }
+            Spinner { x, y, size, label: disc.texture, mask: disc.mask, overlay: Some(overlay), spinning: false, texture_alpha: disc.texture_alpha }
         }
         // Plain black: grooves look the same at every angle, so only the label turns.
         None => {
@@ -238,7 +238,7 @@ fn label(art: Option<&image::RgbaImage>, cx: f32, cy: f32, r: f32, accent: [u8; 
             label[j * size + i] = draw::xrgb(c.map(|v| v.clamp(0.0, 255.0) as u8));
         }
     }
-    Spinner { x, y, size, label, mask, overlay: None, spinning: false }
+    Spinner { x, y, size, label, mask, overlay: None, spinning: false, texture_alpha: false }
 }
 
 /// Pivot top-right of the record; stylus in the groove when playing, on the
