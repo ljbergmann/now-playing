@@ -98,7 +98,9 @@ fetch('state').then(r => r.json()).then(s => {
   f.user.value = s.user; f.shelf.value = s.shelf;
   f.theme.value = s.theme; f.clock.value = s.clock;
   if (s.has_key) { f.key.placeholder = 'saved — leave empty to keep'; }
-  if (s.builtin_key && !s.has_key) document.getElementById('keybox').hidden = true;
+  // With the app's own key, nobody needs to see a key field (a key saved
+  // earlier keeps working in the background).
+  if (s.builtin_key) document.getElementById('keybox').hidden = true;
   if (s.connect) document.getElementById('connectbox').hidden = false;
   const q = location.search;
   if (q.includes('connected') && s.user) say('Connected as ' + s.user + '. It shows up on the display now.', 'ok');
