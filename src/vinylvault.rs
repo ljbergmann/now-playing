@@ -67,15 +67,26 @@ impl Pressing {
         self.finish == Finish::Solid && self.colors.iter().all(|c| c.iter().all(|&v| v < 48))
     }
 
-    /// The name to show: Discogs-style names put the official one in brackets,
-    /// "Blue Translucent Marbled [Moonstone Blue Marbled] Signed Insert".
+    /// The colour's name, without packaging details. Catalogue names mix both:
+    /// "Alternative Cover 4 Clear with Blue Swirls (Blueberry)" → "Blueberry",
+    /// "Blue Translucent Marbled [Moonstone Blue Marbled] Signed Insert" →
+    /// "Moonstone Blue Marbled", "Red [Transparent]" → "Red Transparent",
+    /// "Cola Bottle Green Gatefold" → "Cola Bottle Green".
     pub fn display_name(&self) -> String {
-        let n = self.name.trim();
-        match (n.find('['), n.find(']')) {
-            (Some(a), Some(b)) if b > a + 1 => n[a + 1..b].trim().to_string(),
-            _ if n.is_empty() => "Coloured vinyl".to_string(),
-            _ => n.to_string(),
+        if self.finish == Finish::PictureDisc {
+            return "Picture Disc".into();
         }
+        let n = self.name.trim();
+        // The official colour name, if given: [..] first, else the last (..).
+        let inner = bracketed(n, '[', ']').or_else(|| bracketed_last(n, '(', ')')).map(clean).filter(|i| !i.is_empty());
+        let outer = clean(&strip_brackets(n));
+        let name = match inner {
+            // Only an attribute ("Transparent"): it belongs to the outside name.
+            Some(i) if i.split_whitespace().all(|w| ATTRIBUTES.contains(&w.to_lowercase().as_str())) => format!("{outer} {i}").trim().to_string(),
+            Some(i) => i,
+            None => outer,
+        };
+        if name.is_empty() { "Coloured vinyl".into() } else { name }
     }
 
     /// "PINK MARBLED · LTD. 500"
@@ -90,6 +101,66 @@ impl Pressing {
         }
         parts.join(" · ")
     }
+}
+
+/// Words that describe the plastic, not name a colour.
+const ATTRIBUTES: [&str; 6] = ["transparent", "translucent", "clear", "opaque", "solid", "vinyl"];
+
+/// Packaging and edition words that don't belong in a colour name.
+const NOISE: [&str; 30] = [
+    "gatefold", "promo", "fyc", "box", "edition", "exclusive", "indie", "signed", "insert", "variant", "limited", "ltd",
+    "lp", "2lp", "3lp", "deluxe", "anniversary", "biovinyl", "eco", "ecomix", "recycled", "reissue", "repress",
+    "remastered", "remaster", "180g", "140g", "heavyweight", "numbered", "autographed",
+];
+
+fn bracketed(s: &str, open: char, close: char) -> Option<&str> {
+    let a = s.find(open)?;
+    let b = a + s[a..].find(close)?;
+    Some(s[a + open.len_utf8()..b].trim())
+}
+
+fn bracketed_last(s: &str, open: char, close: char) -> Option<&str> {
+    let a = s.rfind(open)?;
+    let b = a + s[a..].find(close)?;
+    Some(s[a + open.len_utf8()..b].trim())
+}
+
+fn strip_brackets(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0;
+    for c in s.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Drops packaging words and "Alternative Cover 4"-style labels.
+fn clean(s: &str) -> String {
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i].to_lowercase();
+        let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+        // "Alternative Cover 4", "Alt Cover", "Cover 2"
+        if w == "cover" || ((w == "alternative" || w == "alt") && words.get(i + 1).is_some_and(|n| n.eq_ignore_ascii_case("cover"))) {
+            i += 1;
+            while words.get(i).is_some_and(|n| n.eq_ignore_ascii_case("cover") || n.chars().all(|c| c.is_ascii_digit() || c == '#')) {
+                i += 1;
+            }
+            continue;
+        }
+        if !NOISE.contains(&w) {
+            out.push(words[i]);
+        }
+        i += 1;
+    }
+    out.join(" ").trim_matches(|c: char| c == '-' || c == ',' || c == '/' || c.is_whitespace()).to_string()
 }
 
 #[derive(Clone, Debug)]
@@ -546,6 +617,24 @@ mod tests {
         assert_eq!(pick(items(), "Rumours", "Fleetwood Mac"), Some(p)); // same pick every time
         assert!(pick(items(), "Tusk", "Fleetwood Mac").is_none());
         assert!(pick(items(), "Rumours", "Rumours").is_none()); // a band called Rumours
+    }
+
+    #[test]
+    fn colour_names_without_packaging() {
+        let name = |n: &str, f: Finish| Pressing { name: n.into(), finish: f, colors: vec![], edition_size: None, is_limited: false, is_numbered: false, owned: false }.display_name();
+        // Real catalogue names (Linkin Park, From Zero).
+        assert_eq!(name("Alternative Cover 4 Clear with Blue Swirls (Blueberry)", Finish::Swirl), "Blueberry");
+        assert_eq!(name("Clear [Translucent Milky Clear]", Finish::Clear), "Translucent Milky Clear");
+        assert_eq!(name("Cola Bottle Green Gatefold", Finish::Solid), "Cola Bottle Green");
+        assert_eq!(name("Green Translucent [Emerald]", Finish::Clear), "Emerald");
+        assert_eq!(name("Light Blue & Orchid Splatter Gatefold", Finish::Splatter), "Light Blue & Orchid Splatter");
+        assert_eq!(name("Picture Disc League of Legends World Championship 2024", Finish::PictureDisc), "Picture Disc");
+        assert_eq!(name("Red [Transparent]", Finish::Clear), "Red Transparent");
+        assert_eq!(name("Translucent Magenta Gatefold", Finish::Clear), "Translucent Magenta");
+        assert_eq!(name("Promo FYC Box", Finish::Solid), "Coloured vinyl");
+        assert_eq!(name("Opal Girly", Finish::Solid), "Opal Girly");
+        assert_eq!(name("Black (Limited)", Finish::Solid), "Black");
+        assert_eq!(name("Blue & Orange Splatter Biovinyl Anniversary", Finish::Splatter), "Blue & Orange Splatter");
     }
 
     #[test]
