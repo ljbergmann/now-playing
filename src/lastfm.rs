@@ -58,8 +58,10 @@ impl Stats {
         if let Some(n) = self.track_plays {
             parts.push(if n == 0 { "first play".into() } else { format!("{} play", ordinal(n + 1)) });
         }
+        // Like the track's number, the artist's counts the play that's on now
+        // (Last.fm hasn't scrobbled it yet), so it's never below the track's.
         // No artist count before the first play of them: "first play" says it.
-        if let Some(n) = self.artist_plays.filter(|&n| n > 0) {
+        if let Some(n) = self.artist_plays.filter(|&n| n > 0).map(|n| n + 1) {
             let plays = if n == 1 { "play" } else { "plays" };
             parts.push(if artist.is_empty() { format!("{} {plays}", thousands(n)) } else { format!("{} {plays} of {artist}", thousands(n)) });
         }
@@ -602,13 +604,13 @@ mod tests {
     #[test]
     fn stats_line() {
         let s = |loved, t, a| Stats { loved, track_plays: t, artist_plays: a };
-        assert_eq!(s(true, Some(37), Some(1204)).line("Ariana Grande").as_deref(), Some("♥ · 38th play · 1,204 plays of Ariana Grande"));
+        assert_eq!(s(true, Some(37), Some(1204)).line("Ariana Grande").as_deref(), Some("♥ · 38th play · 1,205 plays of Ariana Grande"));
         assert_eq!(s(false, Some(0), Some(0)).line("X").as_deref(), Some("first play"));
-        assert_eq!(s(false, Some(0), Some(5)).line("X").as_deref(), Some("first play · 5 plays of X"));
-        assert_eq!(s(false, Some(1), Some(1)).line("X").as_deref(), Some("2nd play · 1 play of X"));
+        assert_eq!(s(false, Some(0), Some(5)).line("X").as_deref(), Some("first play · 6 plays of X"));
+        assert_eq!(s(false, Some(1), Some(1)).line("X").as_deref(), Some("2nd play · 2 plays of X"));
         assert_eq!(s(true, None, None).line("X").as_deref(), Some("♥"));
-        assert_eq!(s(false, None, Some(2000)).line("X").as_deref(), Some("2,000 plays of X"));
-        assert_eq!(s(false, None, Some(3)).line("").as_deref(), Some("3 plays"));
+        assert_eq!(s(false, None, Some(2000)).line("X").as_deref(), Some("2,001 plays of X"));
+        assert_eq!(s(false, None, Some(3)).line("").as_deref(), Some("4 plays"));
         assert_eq!(s(false, None, None).line("X"), None);
     }
 

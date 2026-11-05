@@ -297,13 +297,24 @@ pub fn glow(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, spread: f32
 pub fn shade(pm: &mut Pixmap, color: [u8; 3], alpha: f32) {
     let w = pm.width() as usize * 4;
     let col = color.map(|c| c as f32 * alpha);
-    par_rows(pm.data_mut(), w, |_, row| {
-        for p in row.chunks_exact_mut(4) {
+    par_rows(pm.data_mut(), w, |y, row| {
+        for (x, p) in row.chunks_exact_mut(4).enumerate() {
+            // Dithered rounding: darkening leaves only a few shades of near-
+            // black, which would show as rings on big screens. A per-pixel
+            // offset below one shade turns the steps into a smooth fade.
+            let d = dither(x, y);
             for c in 0..3 {
-                p[c] = (col[c] + p[c] as f32 * (1.0 - alpha)) as u8;
+                p[c] = (col[c] + p[c] as f32 * (1.0 - alpha) + d).min(255.0) as u8;
             }
         }
     });
+}
+
+/// A fixed, evenly spread value in [0, 1) per pixel (interleaved gradient
+/// noise): no pattern the eye picks up, same every frame (no flicker).
+pub fn dither(x: usize, y: usize) -> f32 {
+    let v = 52.982_918 * (0.067_110_56 * x as f32 + 0.005_837_15 * y as f32).fract();
+    v.fract()
 }
 
 /// Lays a premultiplied layer of the same size over `dst` (parallel, skips
@@ -377,8 +388,18 @@ pub fn cover_fill(art: &RgbaImage, w: u32, h: u32, focus_y: f32) -> RgbaImage {
 }
 
 /// Blurs at 48 px and scales up: a smooth colour field from the cover.
+/// The cover blurred into soft colour, filling a w×h screen.
 pub fn blurred(art: &RgbaImage, w: u32, h: u32, sigma: f32) -> RgbaImage {
-    let small = imageops::thumbnail(art, 48, 48);
+    // Crop the cover to the screen's shape first: stretching a square cover
+    // over a wide screen turns its shapes into flat ovals.
+    let (aw, ah) = (art.width().max(1) as f32, art.height().max(1) as f32);
+    let want = w.max(1) as f32 / h.max(1) as f32;
+    let (cw, ch) = if aw / ah > want { (ah * want, ah) } else { (aw, aw / want) };
+    let (cx, cy) = (((aw - cw) / 2.0) as u32, ((ah - ch) / 2.0) as u32);
+    let crop = imageops::crop_imm(art, cx, cy, (cw as u32).max(1), (ch as u32).max(1)).to_image();
+    // ~48 px on the short side, like before for a square screen.
+    let k = 48.0 / cw.min(ch);
+    let small = imageops::thumbnail(&crop, ((cw * k) as u32).max(1), ((ch * k) as u32).max(1));
     let soft = imageops::blur(&small, sigma);
     upscale(&soft, w, h)
 }
