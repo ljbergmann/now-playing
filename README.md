@@ -77,7 +77,10 @@ user name. It's read from `~/.config/now-playing/build.env`
 (`LASTFM_APP_KEY=…`, register at https://www.last.fm/api/account/create) and
 never stored in the repo. Without it, the setup page also asks for a key. With
 `LASTFM_APP_SECRET=…` as well, the page offers "Connect with Last.fm": people
-tap Allow on Last.fm instead of typing their name.
+tap Allow on Last.fm instead of typing their name. Both end up inside the
+published binaries, so treat them as public: register them under a project
+account, not your personal one. A login still needs each user's own "Allow",
+and the app keeps only the user name, no session key.
 
 | Board | OS | Binary |
 |---|---|---|
