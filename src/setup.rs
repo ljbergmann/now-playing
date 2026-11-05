@@ -42,7 +42,10 @@ pub fn start(on_event: impl Fn(Event) + Send + 'static) -> Result<Option<Started
             format!("setup page: {e}")
         })?;
     let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(port);
-    let token = token();
+    let token = token().map_err(|e| {
+        RUNNING.store(false, Ordering::SeqCst);
+        format!("setup page: no random numbers ({e})")
+    })?;
     let ip = lan_ip().unwrap_or_else(|| "127.0.0.1".into());
     let started = Started {
         url: format!("http://{ip}:{port}/{token}/"),
@@ -56,15 +59,13 @@ pub fn start(on_event: impl Fn(Event) + Send + 'static) -> Result<Option<Started
     Ok(Some(started))
 }
 
-/// 10 random lowercase letters/digits (~51 bits).
-fn token() -> String {
-    let mut b = [0u8; 10];
-    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_err() {
-        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        b.iter_mut().enumerate().for_each(|(i, x)| *x = (t >> (i * 7)) as u8 ^ std::process::id() as u8);
-    }
+/// 16 random characters from a 32-letter alphabet (80 bits), from the OS's
+/// random source. No fallback: without it, no setup page.
+fn token() -> std::io::Result<String> {
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
     const A: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-    b.iter().map(|x| A[*x as usize % A.len()] as char).collect()
+    Ok(b.iter().map(|x| A[*x as usize % A.len()] as char).collect())
 }
 
 /// This machine's address on the local network (no packet is sent).
