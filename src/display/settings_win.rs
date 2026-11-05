@@ -45,6 +45,7 @@ const LOOK: usize = 7;
 const CLOCK24: usize = 8;
 const CLOCK12: usize = 9;
 const STATS: usize = 10;
+const OWNED_HINT: usize = 11;
 
 const BST_CHECKED: usize = 1;
 
@@ -74,9 +75,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 (VV_CONNECT, BN_CLICKED) => push(Action::ConnectVinylVault),
                 (VV_DISCONNECT, BN_CLICKED) => push(Action::DisconnectVinylVault),
                 (CLOCK24 | CLOCK12, BN_CLICKED) => push(Action::TwelveHour(id == CLOCK12)),
-                (STATS, BN_CLICKED) => {
+                (STATS | OWNED_HINT, BN_CLICKED) => {
                     let on = unsafe { SendMessageW(control, BM_GETCHECK, 0, 0) } as usize == BST_CHECKED;
-                    push(Action::Stats(on));
+                    push(if id == STATS { Action::Stats(on) } else { Action::OwnedHint(on) });
                 }
                 (LOOK, CBN_SELCHANGE) => {
                     let t = match unsafe { SendMessageW(control, CB_GETCURSEL, 0, 0) } {
@@ -109,8 +110,9 @@ pub struct SettingsWindow {
     clock24: HWND,
     clock12: HWND,
     stats: HWND,
+    owned_hint: HWND,
     /// Last values shown (see the Mac window: don't disturb an open dropdown).
-    shown: Option<(Theme, bool, bool)>,
+    shown: Option<(Theme, bool, bool, bool)>,
     texts: [String; 3],
 }
 
@@ -140,7 +142,7 @@ impl SettingsWindow {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 px(500),
-                px(330),
+                px(360),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 instance,
@@ -192,18 +194,20 @@ impl SettingsWindow {
             let vv_connect = make("BUTTON", "Connect with VinylVault…", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, cx, 110, 200, 28, VV_CONNECT);
             let vv_disconnect = make("BUTTON", "Disconnect", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, cx + 210, 110, 100, 28, VV_DISCONNECT);
 
-            label("Look", lx, 162, 100);
-            let look = make("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, 0, cx, 158, 150, 200, LOOK);
+            let owned_hint = make("BUTTON", "Remind me when I stream a record I own", WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX as u32, 0, cx, 146, 320, 22, OWNED_HINT);
+
+            label("Look", lx, 192, 100);
+            let look = make("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, 0, cx, 188, 150, 200, LOOK);
             for t in ["Vinyl", "Poster", "Ambient"] {
                 SendMessageW(look, CB_ADDSTRING, 0, wide(t).as_ptr() as LPARAM);
             }
 
-            label("Clock", lx, 200, 100);
-            let clock24 = make("BUTTON", "24-hour (21:47)", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON as u32, 0, cx, 198, 150, 22, CLOCK24);
-            let clock12 = make("BUTTON", "12-hour (9:47 PM)", BS_AUTORADIOBUTTON as u32, 0, cx + 160, 198, 160, 22, CLOCK12);
+            label("Clock", lx, 230, 100);
+            let clock24 = make("BUTTON", "24-hour (21:47)", WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON as u32, 0, cx, 228, 150, 22, CLOCK24);
+            let clock12 = make("BUTTON", "12-hour (9:47 PM)", BS_AUTORADIOBUTTON as u32, 0, cx + 160, 228, 160, 22, CLOCK12);
 
-            label("Play counts", lx, 236, 100);
-            let stats = make("BUTTON", "Show my play counts under the track", WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX as u32, 0, cx, 234, 300, 22, STATS);
+            label("Play counts", lx, 266, 100);
+            let stats = make("BUTTON", "Show my play counts under the track", WS_TABSTOP | WS_GROUP | BS_AUTOCHECKBOX as u32, 0, cx, 264, 300, 22, STATS);
 
             *USER_FIELD.lock().unwrap_or_else(|e| e.into_inner()) = user as usize;
             Some(SettingsWindow {
@@ -216,6 +220,7 @@ impl SettingsWindow {
                 clock24,
                 clock12,
                 stats,
+                owned_hint,
                 shown: None,
                 texts: Default::default(),
             })
@@ -254,7 +259,7 @@ impl SettingsWindow {
         }
         unsafe { EnableWindow(self.vv_disconnect, s.vinylvault.is_some() as i32) };
 
-        let now = (s.theme, s.twelve_hour, s.stats);
+        let now = (s.theme, s.twelve_hour, s.stats, s.owned_hint);
         if self.shown != Some(now) {
             self.shown = Some(now);
             let i = match s.theme {
@@ -268,6 +273,7 @@ impl SettingsWindow {
                 SendMessageW(self.clock24, BM_SETCHECK, check(!s.twelve_hour), 0);
                 SendMessageW(self.clock12, BM_SETCHECK, check(s.twelve_hour), 0);
                 SendMessageW(self.stats, BM_SETCHECK, check(s.stats), 0);
+                SendMessageW(self.owned_hint, BM_SETCHECK, check(s.owned_hint), 0);
             }
         }
     }

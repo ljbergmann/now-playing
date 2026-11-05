@@ -72,6 +72,10 @@ fn foreground(pm: &mut Pixmap, c: &Ctx, pal: draw::Palette) -> Option<crate::sce
             Item::new(&f.regular, clamp(16.0, 4.6 * vmin, 44.0), t.title.clone(), WHITE).eq(true),
             Item::new(&f.light, clamp(13.0, 3.4 * vmin, 32.0), t.artist.clone(), DIM).gap(2.0),
         ];
+        if c.owned {
+            let px = clamp(9.0, 2.0 * vmin, 16.0);
+            items.push(scene::own_hint(&f.bold, px, 0.16, col.1, draw::rgba(pal.accent, 1.0)).gap(0.6 * px));
+        }
         let layout = |items: &[Item]| {
             let text_h = stack_height(items);
             let size = (h - 2.0 * pad - text_h - pad * 0.8).min(w * 0.62).max(40.0);

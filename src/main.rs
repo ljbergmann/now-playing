@@ -257,6 +257,8 @@ struct Look {
     promo: bool,
     /// Your play counts under the playing track (STATS=off hides them).
     stats: bool,
+    /// "You own this on vinyl" while an album from your shelf streams.
+    owned_hint: bool,
 }
 
 fn look() -> Result<Look, String> {
@@ -271,7 +273,8 @@ fn look() -> Result<Look, String> {
     };
     let promo = !matches!(env("PROMO").as_deref(), Some("off" | "0" | "false" | "no"));
     let stats = !matches!(env("STATS").as_deref(), Some("off" | "0" | "false" | "no"));
-    Ok(Look { theme, twelve_hour, promo, stats })
+    let owned_hint = !matches!(env("OWNED_HINT").as_deref(), Some("off" | "0" | "false" | "no"));
+    Ok(Look { theme, twelve_hour, promo, stats, owned_hint })
 }
 
 fn main() {
@@ -479,6 +482,11 @@ impl Records {
         }
         self.catalogue.as_ref().and_then(|c| c.pressing_for(&t.album, &t.artist))
     }
+
+    /// The album is on your shelf (any copy, coloured or black).
+    fn owns(&self, t: &lastfm::Track) -> bool {
+        self.shelf.as_ref().is_some_and(|s| vinylvault::lookup(s, &t.album, &t.artist).is_some())
+    }
 }
 
 /// The running Last.fm poller and the account it polls.
@@ -549,7 +557,10 @@ fn compose_loop(
             (Some(url), _) if !configured || !setup_visited => View::Setup { url, connected: setup_visited },
             (None, _) if !configured => View::Connecting(Some("Not set up yet")),
             (_, None) => View::Connecting(error.as_deref()),
-            (_, Some(t)) => View::Track { track: t.as_ref(), idle, pressing: pressing.as_ref() },
+            (_, Some(t)) => {
+                let owned = look.owned_hint && t.as_ref().is_some_and(|t| records.owns(t));
+                View::Track { track: t.as_ref(), idle, pressing: pressing.as_ref(), owned }
+            }
         };
         // Crossfade when what's shown changes in kind (song, playing/idle, theme);
         // swap instantly for small updates such as the clock ticking.
@@ -653,7 +664,8 @@ fn snapshot(
     if let Some(p) = &pressing {
         println!("{} pressing: {}", if p.owned { "your" } else { "catalogue" }, p.caption());
     }
-    let view = View::Track { track: track.as_ref(), idle, pressing: pressing.as_ref() };
+    let owned = look.owned_hint && track.as_ref().is_some_and(|t| records.owns(t));
+    let view = View::Track { track: track.as_ref(), idle, pressing: pressing.as_ref(), owned };
     save_png(&scene::render(fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour, look.promo), w, path)
 }
 
@@ -719,7 +731,7 @@ fn bench(fonts: &fonts::Fonts) {
     for (label, theme, pressing) in cases {
         for (w, h) in [(480, 320), (800, 480), (1280, 720), (720, 1280)] {
             let t = Instant::now();
-            let view = View::Track { track: Some(&track), idle: false, pressing };
+            let view = View::Track { track: Some(&track), idle: false, pressing, owned: pressing.is_some() };
             let scene = scene::render(fonts, w, h, &view, SystemTime::now(), theme, false, true);
             let render_ms = t.elapsed().as_secs_f64() * 1000.0;
 

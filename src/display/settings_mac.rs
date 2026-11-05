@@ -78,6 +78,11 @@ define_class!(
         fn stats(&self, sender: &NSButton) {
             push(Action::Stats(sender.state() == NSControlStateValueOn));
         }
+
+        #[unsafe(method(ownedHint:))]
+        fn owned_hint(&self, sender: &NSButton) {
+            push(Action::OwnedHint(sender.state() == NSControlStateValueOn));
+        }
     }
 );
 
@@ -110,12 +115,13 @@ pub struct SettingsWindow {
     clock24: Retained<NSButton>,
     clock12: Retained<NSButton>,
     stats: Retained<NSButton>,
+    owned_hint: Retained<NSButton>,
     /// A running sign-in sheet, and the pass that existed before it started.
     sign_in: Option<(Retained<ASWebAuthenticationSession>, Retained<Anchor>, Option<String>)>,
     /// What the controls were last set to (look, 12-hour, stats). They're
     /// only touched when this changes: the window refreshes twice a second,
     /// also while a popup is open, and must not undo a choice being made.
-    shown: Option<(Theme, bool, bool)>,
+    shown: Option<(Theme, bool, bool, bool)>,
 }
 
 fn label(text: &str, mtm: MainThreadMarker) -> Retained<NSTextField> {
@@ -174,6 +180,9 @@ impl SettingsWindow {
         };
         let clock24 = radio("24-hour (21:47)", 24);
         let clock12 = radio("12-hour (9:47 PM)", 12);
+        let owned_hint = unsafe {
+            NSButton::checkboxWithTitle_target_action(&NSString::from_str("Remind me when I stream a record I own"), Some(h), Some(sel!(ownedHint:)), mtm)
+        };
         let stats = unsafe {
             NSButton::checkboxWithTitle_target_action(&NSString::from_str("Show my play counts under the track"), Some(h), Some(sel!(stats:)), mtm)
         };
@@ -192,6 +201,7 @@ impl SettingsWindow {
             NSArray::from_slice(&[&*empty(), &lastfm_status as &NSView]),
             NSArray::from_slice(&[&*heading("VinylVault") as &NSView, &vv_status]),
             NSArray::from_slice(&[&*empty(), &vv_buttons as &NSView]),
+            NSArray::from_slice(&[&*empty(), &owned_hint as &NSView]),
             NSArray::from_slice(&[&*heading("Look") as &NSView, &look]),
             NSArray::from_slice(&[&*heading("Clock") as &NSView, &clocks]),
             NSArray::from_slice(&[&*heading("Play counts") as &NSView, &stats]),
@@ -203,7 +213,7 @@ impl SettingsWindow {
         grid.setRowAlignment(NSGridRowAlignment::FirstBaseline);
         grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
         // A little more air above each section.
-        for i in [2, 4] {
+        for i in [2, 5] {
             grid.rowAtIndex(i).setTopPadding(10.0);
         }
 
@@ -236,6 +246,7 @@ impl SettingsWindow {
             clock24,
             clock12,
             stats,
+            owned_hint,
             sign_in: None,
             shown: None,
         }
@@ -308,7 +319,7 @@ impl SettingsWindow {
         }
         self.vv_button.setTitle(&NSString::from_str(if s.vinylvault.is_some() { "Reconnect…" } else { "Connect with VinylVault…" }));
         self.vv_disconnect.setEnabled(s.vinylvault.is_some());
-        let now = (s.theme, s.twelve_hour, s.stats);
+        let now = (s.theme, s.twelve_hour, s.stats, s.owned_hint);
         if self.shown != Some(now) {
             self.shown = Some(now);
             let i = match s.theme {
@@ -323,6 +334,7 @@ impl SettingsWindow {
             self.clock24.setState(on_off(!s.twelve_hour));
             self.clock12.setState(on_off(s.twelve_hour));
             self.stats.setState(on_off(s.stats));
+            self.owned_hint.setState(on_off(s.owned_hint));
         }
 
         if SHEET_CLOSED.swap(false, std::sync::atomic::Ordering::SeqCst) {

@@ -48,6 +48,9 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
             items.push(Item::new(&f.black, px, l.clone(), WHITE).track(-0.02).gap(if i == 0 { 0.3 * px } else { -0.2 * px }));
         }
         items.push(Item::new(&f.bold, clamp(12.0, 3.6 * vmin, 34.0), t.artist.to_uppercase(), DIM).track(0.14).gap(0.15 * px));
+        if c.owned {
+            items.push(scene::own_hint(&f.bold, clamp(10.0, 2.3 * vmin, 20.0), 0.2, col.1, accent).gap(0.12 * px));
+        }
         if let Some(it) = scene::stats_item(&f.regular, clamp(10.0, 2.2 * vmin, 18.0), t, FAINT) {
             // Into the bottom margin if there's room, so the type above doesn't
             // jump up when it arrives; on small screens it joins the block.

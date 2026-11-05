@@ -97,7 +97,8 @@ pub enum View<'a> {
     Setup { url: &'a str, connected: bool },
     /// `track` = most recent track (if any); `idle` = show the clock screen;
     /// `pressing` = the copy you own of this album (VinylVault), if any.
-    Track { track: Option<&'a Track>, idle: bool, pressing: Option<&'a Pressing> },
+    /// `owned`: the album is on your VinylVault shelf (show "you own this").
+    Track { track: Option<&'a Track>, idle: bool, pressing: Option<&'a Pressing>, owned: bool },
 }
 
 /// What a theme needs to draw.
@@ -106,6 +107,8 @@ pub struct Ctx<'a> {
     pub track: Option<&'a Track>,
     pub playing: bool,
     pub pressing: Option<&'a Pressing>,
+    /// The album is on your shelf: nudge to play the record instead.
+    pub owned: bool,
     pub now: SystemTime,
     /// Show the small VinylVault mentions (PROMO=off hides them).
     pub promo: bool,
@@ -134,7 +137,7 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
             setup(&mut pm, fonts, url, *connected);
             Extras::default()
         }
-        View::Track { track, idle, pressing } => {
+        View::Track { track, idle, pressing, owned } => {
             // No cover on Last.fm? Use generated art so every look stays complete.
             let filled;
             let track = match track {
@@ -146,7 +149,7 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
                 }
                 other => *other,
             };
-            let ctx = Ctx { fonts, track, playing: !idle, pressing: *pressing, now, twelve_hour, promo };
+            let ctx = Ctx { fonts, track, playing: !idle, pressing: *pressing, owned: *owned, now, twelve_hour, promo };
             let mut extras = match theme {
                 Theme::Vinyl => themes::vinyl::render(&mut pm, &ctx),
                 Theme::Poster => themes::poster::render(&mut pm, &ctx),
@@ -362,6 +365,15 @@ pub fn draw_stack(pm: &mut Pixmap, items: &[Item], (x, width): (f32, f32), top: 
 pub fn size_to_width(font: &FontVec, sample: &str, width: f32, max_px: f32, tracking_em: f32) -> f32 {
     let at100 = draw::text_width(font, 100.0, sample, tracking_em * 100.0).max(1.0);
     (100.0 * width / at100).min(max_px)
+}
+
+/// The nudge while an album you own on vinyl is streaming: the longest
+/// wording that fits `width` (narrow screens get a shorter one, not a cut one).
+pub fn own_hint<'f>(font: &'f FontVec, px: f32, tracking_em: f32, width: f32, color: Rgba) -> Item<'f> {
+    let options = ["YOU OWN THIS ON VINYL · PUT IT ON?", "YOU OWN THIS ON VINYL", "ON YOUR SHELF"];
+    let fits = |s: &str| draw::text_width(font, px, s, tracking_em * px) <= width;
+    let text = options.iter().copied().find(|s| fits(s)).unwrap_or(options[2]);
+    Item::new(font, px, text, color).track(tracking_em)
 }
 
 /// The quiet play-count line under the playing track, if Last.fm told us any.

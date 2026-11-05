@@ -16,6 +16,7 @@ pub enum Action {
     Look(Theme),
     TwelveHour(bool),
     Stats(bool),
+    OwnedHint(bool),
 }
 
 pub struct State {
@@ -28,6 +29,7 @@ pub struct State {
     pub theme: Theme,
     pub twelve_hour: bool,
     pub stats: bool,
+    pub owned_hint: bool,
 }
 
 /// The user name check runs on its own thread (it asks Last.fm); its
@@ -54,6 +56,7 @@ impl State {
             theme,
             twelve_hour: on("CLOCK", false),
             stats: on("STATS", true),
+            owned_hint: on("OWNED_HINT", true),
         }
     }
 }
@@ -119,6 +122,10 @@ pub fn apply(player: &mut Player, a: Action) {
         Action::Look(t) => player.command(Command::Look(t)),
         Action::TwelveHour(b) => {
             let _ = settings::save(&[("CLOCK", Some(if b { "12h" } else { "24h" }))]);
+            player.reload();
+        }
+        Action::OwnedHint(b) => {
+            let _ = settings::save(&[("OWNED_HINT", Some(if b { "on" } else { "off" }))]);
             player.reload();
         }
         Action::Stats(b) => {

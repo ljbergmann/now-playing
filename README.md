@@ -127,6 +127,7 @@ options in `/etc/now-playing/env` and `sudo systemctl restart now-playing`.
 | `THEME` | `vinyl` (default), `poster`, `ambient` |
 | `CLOCK` | `24h` (default) or `12h` |
 | `STATS` | `on` (default) or `off`: your Last.fm numbers under the track |
+| `OWNED_HINT` | `on` (default) or `off`: "You own this on vinyl · put it on?" while an album from your VinylVault shelf streams |
 | `VINYLVAULT_CATALOGUE` | `on` (default) or `off`: catalogue pressings for albums you don't own |
 | `PROMO` | `on` (default) or `off`: the small VinylVault mark on the clock screen |
 | `ROTATE` | `auto` (default), `0`, `90`, `180`, `270` (clockwise) |

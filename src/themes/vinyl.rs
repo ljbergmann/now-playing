@@ -105,17 +105,28 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
             late = Some(it.gap + draw::line_h(it.px));
             items.push(it);
         }
-        if let Some(p) = c.pressing {
-            let tint = brightest(p).unwrap_or(pal.accent);
-            items.push(
-                Item::new(&f.bold, clamp(10.0, 2.2 * vmin, 18.0), format!("{} · {}", if p.owned { "YOUR PRESSING" } else { "ON VINYL" }, p.caption().to_uppercase()), draw::rgba(tint, 1.0))
-                    .track(0.14)
-                    .gap(0.35 * title_px),
-            );
-            if c.promo {
-                let via = if p.owned { "VIA YOUR VINYLVAULT SHELF" } else { "VIA VINYLVAULT" };
-                items.push(Item::new(&f.bold, clamp(9.0, 1.7 * vmin, 14.0), via, FAINT).track(0.16).gap(2.0));
+        let small = clamp(10.0, 2.2 * vmin, 18.0);
+        let tiny = clamp(9.0, 1.7 * vmin, 14.0);
+        let tint = c.pressing.and_then(brightest).unwrap_or(pal.accent);
+        match c.pressing {
+            // Streaming an album that's on your shelf: first the nudge to play
+            // the record, then which pressing it is.
+            Some(p) if p.owned && c.owned => {
+                items.push(scene::own_hint(&f.bold, small, 0.14, cw, draw::rgba(tint, 1.0)).gap(0.35 * title_px));
+                let via = if c.promo { " · VINYLVAULT" } else { "" };
+                items.push(Item::new(&f.bold, tiny, format!("{}{via}", p.caption().to_uppercase()), FAINT).track(0.16).gap(2.0));
             }
+            Some(p) => {
+                let what = if p.owned { "YOUR PRESSING" } else { "ON VINYL" };
+                items.push(Item::new(&f.bold, small, format!("{what} · {}", p.caption().to_uppercase()), draw::rgba(tint, 1.0)).track(0.14).gap(0.35 * title_px));
+                if c.promo {
+                    let via = if p.owned { "VIA YOUR VINYLVAULT SHELF" } else { "VIA VINYLVAULT" };
+                    items.push(Item::new(&f.bold, tiny, via, FAINT).track(0.16).gap(2.0));
+                }
+            }
+            // On your shelf on plain black.
+            None if c.owned => items.push(scene::own_hint(&f.bold, small, 0.14, cw, draw::rgba(pal.accent, 1.0)).gap(0.35 * title_px)),
+            None => {}
         }
     } else {
         let clk = draw::clock(c.now, c.twelve_hour);
