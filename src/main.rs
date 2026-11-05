@@ -136,9 +136,88 @@ fn look() -> Result<Look, String> {
 }
 
 fn main() {
+    mac_app::load_settings();
     if let Err(e) = run() {
         eprintln!("now-playing: {e}");
+        mac_app::show_error(&e);
         std::process::exit(1);
+    }
+}
+
+/// The Mac app is opened from Finder, so it has no shell environment: it reads
+/// its settings from a file instead and shows problems in a dialog.
+mod mac_app {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    const TEMPLATE: &str = "\
+# Now Playing settings: one NAME=value per line. Lines starting with # are ignored.
+# Your Last.fm user name and API key (free: https://www.last.fm/api/account/create)
+LASTFM_USER=
+LASTFM_API_KEY=
+
+# Look: vinyl, poster or ambient
+#THEME=vinyl
+#CLOCK=24h
+# Your shared VinylVault shelf link
+#VINYLVAULT_SHELF=
+";
+
+    pub fn settings_path() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME")?;
+        Some(PathBuf::from(home).join("Library/Application Support/Now Playing/settings"))
+    }
+
+    fn from_finder() -> bool {
+        cfg!(target_os = "macos") && unsafe { libc::isatty(2) } == 0
+    }
+
+    /// Fill in settings that aren't already set in the environment.
+    pub fn load_settings() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return };
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            if let Some((k, v)) = line.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                if !k.is_empty() && std::env::var_os(k).is_none() {
+                    // SAFETY: called first thing in main, before any thread exists.
+                    unsafe { std::env::set_var(k, v) };
+                }
+            }
+        }
+    }
+
+    /// From Finder there's no terminal to print to: show a dialog, and when
+    /// Last.fm isn't set up yet, create the settings file and open it.
+    pub fn show_error(e: &str) {
+        if !from_finder() {
+            return;
+        }
+        let Some(path) = settings_path() else { return };
+        let missing = e.contains("LASTFM_USER") || e.contains("LASTFM_API_KEY");
+        if missing && !path.exists() {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&path, TEMPLATE);
+            // Owner only: it will hold an API key.
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        let msg = if missing {
+            "Add your Last.fm user name and API key to the settings file that opens next, save it, and start Now Playing again.".to_string()
+        } else {
+            e.to_string()
+        };
+        // Passed as an argument, not spliced into the script.
+        let _ = Command::new("osascript")
+            .args(["-e", "on run argv", "-e", "display alert \"Now Playing\" message (item 1 of argv)", "-e", "end run", &msg])
+            .status();
+        if missing {
+            let _ = Command::new("open").arg("-t").arg(&path).status();
+        }
     }
 }
 

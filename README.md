@@ -132,6 +132,19 @@ or edit `/etc/now-playing/env` and `sudo systemctl restart now-playing`:
 shows "Scrobbling now" right away, the display follows track changes within a
 few seconds. If the song only appears later, the display will lag behind.
 
+## Mac app
+
+```bash
+./mac/bundle.sh      # → dist/Now Playing.app (with icon; drag it to Applications)
+```
+
+On first start it creates `~/Library/Application Support/Now Playing/settings`
+and opens it: fill in `LASTFM_USER` and `LASTFM_API_KEY` (plus any setting
+from the table above), save, and start it again. Keys 1/2/3 switch the look.
+The app is ad-hoc signed, not notarized: the first time, right-click it →
+Open. Without Inter installed it uses the system font (San Francisco). The
+icon is drawn in code (`cargo run --release --example icon -- icon.png`).
+
 ## Develop on a Mac
 
 ```bash

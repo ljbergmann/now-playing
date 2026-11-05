@@ -1,6 +1,7 @@
 //! Font discovery. Uses `FONT_REGULAR` / `FONT_BOLD` if set, otherwise asks
 //! fontconfig (`fc-match`) for Inter and lets it fall back to whatever sans
-//! is installed. On the Pi the setup script installs `fonts-inter`.
+//! is installed. On the Pi the setup script installs `fonts-inter`. On macOS,
+//! when Inter isn't installed, the system font (San Francisco) is used.
 
 use std::process::Command;
 
@@ -14,17 +15,39 @@ pub struct Fonts {
     pub black: FontVec,
 }
 
-fn fc_match(pattern: &str) -> Option<(String, u32)> {
-    let out = Command::new("fc-match").args(["-f", "%{file}|%{index}", pattern]).output().ok()?;
+/// `fc-match`, also where Homebrew puts it: apps opened from Finder don't
+/// get the shell's PATH.
+fn fc_match(pattern: &str) -> Option<(String, String, u32)> {
+    let out = ["fc-match", "/opt/homebrew/bin/fc-match", "/usr/local/bin/fc-match"]
+        .iter()
+        .find_map(|bin| Command::new(bin).args(["-f", "%{family}|%{file}|%{index}", pattern]).output().ok())?;
     let s = String::from_utf8(out.stdout).ok()?;
-    let (file, index) = s.split_once('|')?;
-    (!file.is_empty()).then(|| (file.to_string(), index.trim().parse().unwrap_or(0)))
+    let mut parts = s.splitn(3, '|');
+    let (family, file, index) = (parts.next()?, parts.next()?, parts.next()?);
+    (!file.is_empty()).then(|| (family.to_string(), file.to_string(), index.trim().parse().unwrap_or(0)))
+}
+
+const MAC_SYSTEM_FONT: &str = "/System/Library/Fonts/SFNS.ttf";
+
+/// Inter if fontconfig has it; on a Mac without Inter, San Francisco (a
+/// variable font, so every weight works); otherwise fontconfig's fallback.
+fn find(pattern: &str) -> Option<(String, u32)> {
+    let found = fc_match(pattern);
+    if let Some((family, file, index)) = &found {
+        if family.contains("Inter") {
+            return Some((file.clone(), *index));
+        }
+    }
+    if cfg!(target_os = "macos") && std::path::Path::new(MAC_SYSTEM_FONT).exists() {
+        return Some((MAC_SYSTEM_FONT.to_string(), 0));
+    }
+    found.map(|(_, file, index)| (file, index))
 }
 
 fn load(env: &str, pattern: &str, weight: f32) -> Result<FontVec, String> {
     let (path, index) = match std::env::var(env) {
         Ok(p) if !p.is_empty() => (p, 0),
-        _ => fc_match(pattern).ok_or_else(|| {
+        _ => find(pattern).ok_or_else(|| {
             format!("no font found for '{pattern}' (install fontconfig + fonts-inter, or set {env})")
         })?,
     };
