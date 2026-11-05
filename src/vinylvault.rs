@@ -90,22 +90,19 @@ struct ShelfJson {
     #[serde(default)]
     records: Vec<RecordJson>,
 }
+// Text fields may be `null` (a copy described only by its owner), so they are Options.
 #[derive(Deserialize)]
 struct RecordJson {
-    #[serde(default)]
-    release_title: String,
-    #[serde(default)]
-    artist_name: String,
+    release_title: Option<String>,
+    artist_name: Option<String>,
     pressing: Option<PressingJson>,
 }
 #[derive(Deserialize)]
 struct PressingJson {
+    colourway_name: Option<String>,
+    finish: Option<String>,
     #[serde(default)]
-    colourway_name: String,
-    #[serde(default)]
-    finish: String,
-    #[serde(default)]
-    colour_hexes: Vec<String>,
+    colour_hexes: Option<Vec<String>>,
     edition_size: Option<u32>,
     #[serde(default)]
     is_limited: bool,
@@ -127,14 +124,17 @@ fn parse(body: &str) -> Result<Vec<Record>, String> {
     Ok(shelf
         .records
         .into_iter()
-        .filter(|r| !r.release_title.is_empty())
-        .map(|r| Record {
-            title_key: norm_title(&r.release_title),
-            artist_key: norm(&r.artist_name),
-            pressing: r.pressing.map(|p| Pressing {
-                name: p.colourway_name,
-                finish: Finish::parse(&p.finish),
-                colors: p.colour_hexes.iter().filter_map(|h| hex(h)).take(6).collect(),
+        .filter_map(|r| {
+            let title = r.release_title.filter(|t| !t.is_empty())?;
+            Some((title, r.artist_name.unwrap_or_default(), r.pressing))
+        })
+        .map(|(title, artist, pressing)| Record {
+            title_key: norm_title(&title),
+            artist_key: norm(&artist),
+            pressing: pressing.map(|p| Pressing {
+                name: p.colourway_name.unwrap_or_default(),
+                finish: Finish::parse(p.finish.as_deref().unwrap_or("")),
+                colors: p.colour_hexes.unwrap_or_default().iter().filter_map(|h| hex(h)).take(6).collect(),
                 edition_size: p.edition_size,
                 is_limited: p.is_limited,
                 is_numbered: p.is_numbered,
@@ -304,6 +304,30 @@ mod tests {
         assert!(lookup(&s, "Black Album", "Someone").is_none());
         assert!(lookup(&s, "No Pressing Info", "X").is_none());
         assert!(lookup(&s, "Escapism.", "Different Artist").is_none());
+    }
+
+    /// Bodies exactly as the VinylVault endpoint's own tests expect them
+    /// (backend/tests/test_shelf_json.py), nulls included.
+    #[test]
+    fn parses_real_endpoint_shapes() {
+        let json = r##"{"name":"Shelf Person","records":[
+          {"release_title":"Shelf Album","artist_name":"Shelf Act","release_year":2024,
+           "pressing":{"colourway_name":"Pink Marbled","finish":"marbled","colour_hexes":["#F599BD","#F7F7F5"],
+                       "edition_size":500,"is_limited":true,"is_numbered":false,"format":"12in","disc_count":1}},
+          {"release_title":"Loose Record","artist_name":"Someone","release_year":null,
+           "pressing":{"colourway_name":"Blue Splatter","finish":"splatter","colour_hexes":["#3D70D6","#1A1A1C"],
+                       "edition_size":null,"is_limited":false,"is_numbered":false,"format":"LP","disc_count":null}},
+          {"release_title":"Mystery","artist_name":null,"release_year":null,
+           "pressing":{"colourway_name":null,"finish":"solid","colour_hexes":[],
+                       "edition_size":null,"is_limited":false,"is_numbered":false,"format":null,"disc_count":null}}
+        ]}"##;
+        let s = shelf(json);
+        assert_eq!(s.read().unwrap().len(), 3);
+        let p = lookup(&s, "Shelf Album", "Shelf Act").unwrap();
+        assert_eq!((p.finish, p.caption().as_str()), (Finish::Marbled, "Pink Marbled · Ltd. 500"));
+        let p = lookup(&s, "Loose Record", "Someone feat. Other").unwrap();
+        assert_eq!(p.finish, Finish::Splatter);
+        assert!(lookup(&s, "Mystery", "Anyone").is_none()); // plain, no colours
     }
 
     #[test]
