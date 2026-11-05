@@ -133,10 +133,10 @@ fn urlencode(s: &str) -> String {
 }
 
 /// Swaps VinylVault's one-time code for the display's read-only pass.
-fn vinylvault_token(code: &str, verifier: &str) -> Result<(String, String), String> {
+fn vinylvault_token(site: &str, code: &str, verifier: &str) -> Result<(String, String), String> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).user_agent("now-playing-display/0.3").build();
     let resp = agent
-        .post(&format!("{}/displays/token", vinylvault::site()))
+        .post(&format!("{site}/displays/token"))
         .set("Content-Type", "application/json")
         .send_string(&serde_json::json!({ "code": code, "verifier": verifier }).to_string())
         .map_err(|e| match e {
@@ -191,8 +191,8 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
     let base = format!("/{token}");
     let mut last = Instant::now();
     let mut visited = false;
-    // "Connect with VinylVault" in progress: (verifier, state).
-    let mut pending: Option<(String, String)> = None;
+    // "Connect with VinylVault" in progress: (verifier, state, site).
+    let mut pending: Option<(String, String, String)> = None;
     loop {
         let req = match server.recv_timeout(Duration::from_secs(1)) {
             Ok(Some(r)) => r,
@@ -277,18 +277,20 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
             // "Connect with VinylVault": like Last.fm, plus PKCE so a stolen
             // code is useless without the verifier only this display knows.
             (Method::Get, "/vinylvault/connect") => {
+                let site = vinylvault::site();
+                let secure = site.starts_with("https://") || site.starts_with("http://127.0.0.1") || site.starts_with("http://localhost");
                 let reply = match (host(&req), random(64, URL_SAFE), random(32, URL_SAFE)) {
-                    (Some(h), Ok(verifier), Ok(state)) => {
+                    (Some(h), Ok(verifier), Ok(state)) if secure => {
                         let back = format!("http://{h}{base}/vinylvault/back");
                         let to = format!(
                             "{}/connect?name={}&cb={}&challenge={}&state={}",
-                            vinylvault::site(),
+                            site,
                             urlencode(&display_name()),
                             urlencode(&back),
                             challenge(&verifier),
                             state
                         );
-                        pending = Some((verifier, state));
+                        pending = Some((verifier, state, site));
                         Response::empty(302).with_header(header("Location", &to))
                     }
                     _ => Response::empty(500),
@@ -298,9 +300,13 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
             (Method::Get, "/vinylvault/back") => {
                 let result = match (&pending, param(&query, "state"), param(&query, "code")) {
                     (_, _, _) if param(&query, "error").is_some() => Err("denied".to_string()),
-                    (Some((verifier, state)), Some(s), Some(code)) if s == *state => vinylvault_token(&code, verifier)
+                    (Some((verifier, state, site)), Some(s), Some(code)) if s == *state => vinylvault_token(site, &code, verifier)
                         .and_then(|(token, owner)| {
-                            settings::save(&[("VINYLVAULT_TOKEN", Some(&token)), ("VINYLVAULT_OWNER", Some(&owner))])
+                            settings::save(&[
+                                ("VINYLVAULT_TOKEN", Some(&token)),
+                                ("VINYLVAULT_TOKEN_SITE", Some(site)),
+                                ("VINYLVAULT_OWNER", Some(&owner)),
+                            ])
                         }),
                     _ => Err("this link doesn't belong to this setup".to_string()),
                 };

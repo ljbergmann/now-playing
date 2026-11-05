@@ -344,8 +344,10 @@ pub struct Source {
 }
 
 pub fn source() -> Option<Source> {
-    if let Some(token) = crate::settings::get("VINYLVAULT_TOKEN") {
-        return Some(Source { url: format!("{}/me/shelf.json", site()), token: Some(token) });
+    // The pass only ever goes to the site that issued it (saved with it),
+    // never to one taken from a pasted shelf link.
+    if let (Some(token), Some(issuer)) = (crate::settings::get("VINYLVAULT_TOKEN"), crate::settings::get("VINYLVAULT_TOKEN_SITE")) {
+        return Some(Source { url: format!("{}/me/shelf.json", issuer.trim_end_matches('/')), token: Some(token) });
     }
     crate::settings::get("VINYLVAULT_SHELF").map(|s| Source { url: shelf_url(&s), token: None })
 }
@@ -444,7 +446,7 @@ pub fn spawn(src: Source, changed: impl Fn() -> bool + Send + 'static) -> Shelf 
                 Err(e) if e == REVOKED => {
                     // Forget the pass; the setup page then offers to reconnect.
                     eprintln!("{e}");
-                    let _ = crate::settings::save(&[("VINYLVAULT_TOKEN", None), ("VINYLVAULT_OWNER", None)]);
+                    let _ = crate::settings::save(&[("VINYLVAULT_TOKEN", None), ("VINYLVAULT_TOKEN_SITE", None), ("VINYLVAULT_OWNER", None)]);
                     if let Ok(mut w) = out.write() {
                         w.clear();
                     }
