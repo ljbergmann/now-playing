@@ -81,6 +81,14 @@ impl Theme {
             _ => None,
         }
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Theme::Vinyl => "vinyl",
+            Theme::Poster => "poster",
+            Theme::Ambient => "ambient",
+        }
+    }
 }
 
 pub enum View<'a> {

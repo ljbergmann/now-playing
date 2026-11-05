@@ -20,10 +20,6 @@ case "$(uname -m)" in
 esac
 [[ -f "$BIN" ]] || { echo "missing $BIN (run pi/build.sh on the Mac and copy dist/)" >&2; exit 1; }
 
-echo "==> Installing fonts"
-sudo apt-get update -qq
-sudo apt-get install -y -qq fontconfig fonts-inter
-
 echo "==> Installing $(basename "$BIN") to /usr/local/bin/now-playing"
 sudo install -m 755 "$BIN" /usr/local/bin/now-playing
 

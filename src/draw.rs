@@ -570,9 +570,16 @@ const MONTHS: [&str; 12] =
 /// Local wall-clock time (uses the system time zone, like `date`).
 pub fn clock(now: SystemTime, twelve_hour: bool) -> Clock {
     let secs = now.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as libc::time_t;
-    // SAFETY: localtime_r writes only into the provided struct.
+    // SAFETY: localtime_r / localtime_s write only into the provided struct.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&secs, &mut tm) };
+    #[cfg(unix)]
+    unsafe {
+        libc::localtime_r(&secs, &mut tm)
+    };
+    #[cfg(windows)]
+    unsafe {
+        libc::localtime_s(&mut tm, &secs)
+    };
     let time = if twelve_hour {
         format!("{}:{:02}", (tm.tm_hour + 11) % 12 + 1, tm.tm_min)
     } else {

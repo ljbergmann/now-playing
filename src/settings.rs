@@ -4,6 +4,7 @@
 //! Where it lives:
 //!   `NP_SETTINGS` if set, else
 //!   macOS: ~/Library/Application Support/Now Playing/settings
+//!   Windows: %APPDATA%\Now Playing\settings
 //!   Linux: $STATE_DIRECTORY/settings (systemd's StateDirectory=, i.e.
 //!          /var/lib/now-playing on the Pi), else ~/.config/now-playing/settings
 //!
@@ -18,6 +19,9 @@ use std::sync::Mutex;
 pub fn path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("NP_SETTINGS").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
+    }
+    if cfg!(windows) {
+        return std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Now Playing").join("settings"));
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
@@ -71,12 +75,12 @@ pub fn save(changes: &[(&str, Option<&str>)]) -> Result<(), String> {
     }
     let tmp = path.with_extension("tmp");
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        // Owner only. (On Windows the per-user AppData folder already is.)
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let mut f = opts
             .open(&tmp)
             .map_err(|e| format!("{}: {e}", tmp.display()))?;
         f.write_all(text.as_bytes()).and_then(|_| f.sync_all()).map_err(|e| format!("{}: {e}", tmp.display()))?;

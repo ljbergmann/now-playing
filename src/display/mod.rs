@@ -1,5 +1,5 @@
-//! Where frames go: straight to the screen via DRM/KMS on the Pi,
-//! a normal (resizable) window on the Mac for development.
+//! Where frames go: straight to the screen via DRM/KMS on the Pi (no
+//! desktop), else a window (Mac, Windows, Linux with a desktop).
 
 use crate::frame::Rect;
 
@@ -13,38 +13,30 @@ pub enum Dirty {
     Rects(Vec<Rect>),
 }
 
+#[cfg(target_os = "linux")]
 pub enum Status {
     Continue,
     Quit,
-    /// Same output, new size (Mac window resized). Re-render at `size()`.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
-    Resized,
     /// The screen went away or changed (unplugged, swapped). Re-open.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Lost,
 }
 
+#[cfg(target_os = "linux")]
 pub trait Display {
     /// Logical size, i.e. after rotation.
     fn size(&self) -> (usize, usize);
     /// Shows `frame` and waits for the next vblank (≈ 16.7 ms at 60 Hz).
     fn present(&mut self, frame: &[u32], dirty: Dirty) -> Result<Status, String>;
-    /// A key pressed since the last call (development window only).
-    fn key(&mut self) -> Option<char> {
-        None
-    }
 }
 
 /// Settings from the environment (see README).
+/// For the Pi's direct screen output (a window gets these from the menu).
 pub struct Options {
-    /// Window size on the Mac; ignored on the Pi (uses the screen's own mode).
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
-    pub size: Option<(usize, usize)>,
     /// Clockwise rotation in degrees; `None` = auto (panel orientation, else 0).
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub rotate: Option<u32>,
     /// Which output to use, e.g. "HDMI-A-1" or "DSI-1"; `None` = first connected.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub connector: Option<String>,
 }
 
@@ -55,10 +47,23 @@ pub fn open(opts: &Options) -> Result<Box<dyn Display>, String> {
     Ok(Box::new(kms::Kms::open(opts)?))
 }
 
-#[cfg(target_os = "macos")]
-mod window;
-#[cfg(target_os = "macos")]
-pub fn open(opts: &Options) -> Result<Box<dyn Display>, String> {
-    let (w, h) = opts.size.unwrap_or((800, 480));
-    Ok(Box::new(window::Win::open(w, h)?))
+#[cfg(feature = "desktop")]
+mod desktop;
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+mod settings_mac;
+#[cfg(feature = "desktop")]
+mod settings_ui;
+#[cfg(feature = "desktop")]
+pub use desktop::run as run_desktop;
+
+/// A desktop to open a window on: always on Mac/Windows, on Linux only
+/// inside a graphical session (a Pi with OS Lite has none).
+pub fn desktop_available() -> bool {
+    if !cfg!(feature = "desktop") {
+        return false;
+    }
+    if cfg!(target_os = "linux") {
+        return ["WAYLAND_DISPLAY", "DISPLAY"].iter().any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
+    }
+    true
 }

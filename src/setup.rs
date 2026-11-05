@@ -13,6 +13,15 @@ use crate::{lastfm, settings, vinylvault};
 
 const PAGE: &str = include_str!("setup.html");
 static RUNNING: AtomicBool = AtomicBool::new(false);
+/// While running: the address for a browser on this machine.
+static LOCAL_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The running page's address on this machine (for the desktop app's
+/// Connect buttons, which open the browser at `…/connect`).
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub fn local_url() -> Option<String> {
+    LOCAL_URL.lock().ok()?.clone()
+}
 
 pub enum Event {
     /// The page was opened on a phone/browser.
@@ -51,8 +60,14 @@ pub fn start(on_event: impl Fn(Event) + Send + 'static) -> Result<Option<Started
         url: format!("http://{ip}:{port}/{token}/"),
         local_url: format!("http://127.0.0.1:{port}/{token}/"),
     };
+    if let Ok(mut l) = LOCAL_URL.lock() {
+        *l = Some(started.local_url.clone());
+    }
     std::thread::spawn(move || {
         serve(&server, &token, &on_event);
+        if let Ok(mut l) = LOCAL_URL.lock() {
+            *l = None;
+        }
         RUNNING.store(false, Ordering::SeqCst);
         on_event(Event::Closed);
     });
@@ -65,10 +80,11 @@ fn token() -> std::io::Result<String> {
     random(16, b"abcdefghijkmnpqrstuvwxyz23456789")
 }
 
-/// `n` random characters from `alphabet` (whose length divides 256, so no bias).
+/// `n` random characters from `alphabet` (whose length divides 256, so no bias),
+/// from the operating system's random source.
 fn random(n: usize, alphabet: &[u8]) -> std::io::Result<String> {
     let mut b = vec![0u8; n];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
+    getrandom::fill(&mut b).map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(b.iter().map(|x| alphabet[*x as usize % alphabet.len()] as char).collect())
 }
 
@@ -115,9 +131,14 @@ fn param(query: &str, name: &str) -> Option<String> {
 
 /// Shown in VinylVault's list of connected displays.
 fn display_name() -> String {
-    let mut buf = [0u8; 64];
-    let host = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
-    let host = if host { String::from_utf8_lossy(&buf[..buf.iter().position(|&b| b == 0).unwrap_or(0)]).to_string() } else { String::new() };
+    #[cfg(unix)]
+    let host = {
+        let mut buf = [0u8; 64];
+        let ok = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
+        if ok { String::from_utf8_lossy(&buf[..buf.iter().position(|&b| b == 0).unwrap_or(0)]).to_string() } else { String::new() }
+    };
+    #[cfg(windows)]
+    let host = std::env::var("COMPUTERNAME").unwrap_or_default();
     let host = host.split('.').next().unwrap_or("").to_string(); // "Mac.home" → "Mac"
     let name = if host.is_empty() { "Now Playing".to_string() } else { format!("Now Playing · {host}") };
     name.chars().take(60).collect()
@@ -130,6 +151,32 @@ fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// "Connect with VinylVault" in progress: (verifier, state, site).
+static PENDING: std::sync::Mutex<Option<(String, String, String)>> = std::sync::Mutex::new(None);
+
+/// Starts "Connect with VinylVault": returns the VinylVault address to send
+/// the person to; VinylVault sends them back to `page` + "vinylvault/back",
+/// where this server finishes the connection. PKCE so a stolen code is
+/// useless without the verifier only this display knows.
+pub fn vinylvault_start(page: &str) -> Option<String> {
+    let site = vinylvault::site();
+    let secure = site.starts_with("https://") || site.starts_with("http://127.0.0.1") || site.starts_with("http://localhost");
+    let (verifier, state) = (random(64, URL_SAFE).ok()?, random(32, URL_SAFE).ok()?);
+    if !secure {
+        return None;
+    }
+    let to = format!(
+        "{}/connect?name={}&cb={}&challenge={}&state={}",
+        site,
+        urlencode(&display_name()),
+        urlencode(&format!("{page}vinylvault/back")),
+        challenge(&verifier),
+        state
+    );
+    *PENDING.lock().ok()? = Some((verifier, state, site));
+    Some(to)
 }
 
 /// Swaps VinylVault's one-time code for the display's read-only pass.
@@ -191,8 +238,6 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
     let base = format!("/{token}");
     let mut last = Instant::now();
     let mut visited = false;
-    // "Connect with VinylVault" in progress: (verifier, state, site).
-    let mut pending: Option<(String, String, String)> = None;
     loop {
         let req = match server.recv_timeout(Duration::from_secs(1)) {
             Ok(Some(r)) => r,
@@ -277,27 +322,14 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
             // "Connect with VinylVault": like Last.fm, plus PKCE so a stolen
             // code is useless without the verifier only this display knows.
             (Method::Get, "/vinylvault/connect") => {
-                let site = vinylvault::site();
-                let secure = site.starts_with("https://") || site.starts_with("http://127.0.0.1") || site.starts_with("http://localhost");
-                let reply = match (host(&req), random(64, URL_SAFE), random(32, URL_SAFE)) {
-                    (Some(h), Ok(verifier), Ok(state)) if secure => {
-                        let back = format!("http://{h}{base}/vinylvault/back");
-                        let to = format!(
-                            "{}/connect?name={}&cb={}&challenge={}&state={}",
-                            site,
-                            urlencode(&display_name()),
-                            urlencode(&back),
-                            challenge(&verifier),
-                            state
-                        );
-                        pending = Some((verifier, state, site));
-                        Response::empty(302).with_header(header("Location", &to))
-                    }
-                    _ => Response::empty(500),
+                let reply = match host(&req).and_then(|h| vinylvault_start(&format!("http://{h}{base}/"))) {
+                    Some(to) => Response::empty(302).with_header(header("Location", &to)),
+                    None => Response::empty(500),
                 };
                 let _ = req.respond(reply);
             }
             (Method::Get, "/vinylvault/back") => {
+                let pending = PENDING.lock().ok().and_then(|mut p| p.take());
                 let result = match (&pending, param(&query, "state"), param(&query, "code")) {
                     (_, _, _) if param(&query, "error").is_some() => Err("denied".to_string()),
                     (Some((verifier, state, site)), Some(s), Some(code)) if s == *state => vinylvault_token(site, &code, verifier)
@@ -310,7 +342,6 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
                         }),
                     _ => Err("this link doesn't belong to this setup".to_string()),
                 };
-                pending = None;
                 let to = match result {
                     Ok(()) => {
                         on_event(Event::Saved);

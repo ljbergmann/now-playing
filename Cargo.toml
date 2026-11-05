@@ -16,9 +16,28 @@ tiny-skia = "0.12.0"
 tiny_http = "0.12.0"
 ureq = "2"
 
+# The desktop window (Mac, Windows, Linux with a desktop). Pi builds leave it
+# out (`--no-default-features`) and draw straight to the screen (DRM/KMS).
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+getrandom = "0.3"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:winit", "dep:softbuffer", "dep:muda", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:objc2-authentication-services", "dep:block2"]
+
+# Menus (menu bar on the Mac, right-click menu on Windows). Not on Linux:
+# there muda needs GTK; the Linux window uses keys instead.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+muda = { version = "0.21", optional = true }
+
+# The native settings window on the Mac (AppKit). Same versions muda uses.
 [target.'cfg(target_os = "macos")'.dependencies]
-# "x11" only satisfies minifb's build-script check (it misses *-apple-darwin); macOS uses Cocoa.
-minifb = { version = "0.29.0", default-features = false, features = ["x11"] }
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
+objc2-app-kit = { version = "0.3", optional = true }
+objc2-authentication-services = { version = "0.3", optional = true }
+block2 = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 drm = "0.15.0"

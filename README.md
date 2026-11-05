@@ -142,8 +142,8 @@ loop only blends finished frames and redraws what moves.
 | `src/themes/` | The looks (`vinyl.rs`, `poster.rs`, `ambient.rs`) and vinyl finishes (`pressing.rs`) |
 | `src/draw.rs` | Shared drawing: text, shapes, cover scaling, palette, clock |
 | `src/frame.rs` | Per-frame work: crossfade, colour drift, spinning record, equalizer |
-| `src/display/` | Pi output (`kms.rs`, DRM/KMS) and Mac window (`window.rs`) |
-| `src/fonts.rs` | Finds Inter (or another sans) via fontconfig |
+| `src/display/` | Pi output without a desktop (`kms.rs`, DRM/KMS) and the window for Mac, Windows and desktop Linux (`desktop.rs`) |
+| `src/fonts.rs` | Inter, built in (`assets/fonts`, SIL Open Font License) |
 
 ## Building
 

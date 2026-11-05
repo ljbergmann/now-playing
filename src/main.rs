@@ -25,6 +25,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
 use display::Status;
 use scene::{Scene, Theme, View};
 
@@ -37,8 +38,122 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 /// SIGUSR1 (`systemctl kill -s USR1 now-playing`) opens the setup page again.
 static SETUP: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
 extern "C" fn on_setup_signal(_: libc::c_int) {
     SETUP.store(true, Ordering::Relaxed);
+}
+pub fn take_setup_request() -> bool {
+    SETUP.swap(false, Ordering::Relaxed)
+}
+
+/// What keys and menus ask for.
+pub enum Command {
+    Look(Theme),
+    IdlePreview,
+    Settings,
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    Fullscreen,
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    Screen(String),
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    Quit,
+}
+
+/// The 60 fps side: takes finished frames from the compose thread and
+/// produces the pixels to show. Driven by the Pi's screen loop or the
+/// desktop window.
+pub struct Player {
+    comp: frame::Compositor,
+    size: (usize, usize),
+    scene_rx: mpsc::Receiver<(Scene, bool)>,
+    msg_tx: mpsc::Sender<Msg>,
+    theme: Theme,
+    browser: bool,
+}
+
+impl Player {
+    fn start(fonts: fonts::Fonts, look: Look, size: (usize, usize), msg_tx: mpsc::Sender<Msg>, msg_rx: mpsc::Receiver<Msg>, browser: bool) -> Player {
+        let (scene_tx, scene_rx) = mpsc::channel::<(Scene, bool)>();
+        let theme = look.theme;
+        let tx = msg_tx.clone();
+        thread::spawn(move || compose_loop(fonts, look, size, tx, msg_rx, scene_tx));
+        Player { comp: frame::Compositor::new(size.0, size.1), size, scene_rx, msg_tx, theme, browser }
+    }
+
+    pub fn size(&self) -> (usize, usize) {
+        self.size
+    }
+
+    pub fn theme(&self) -> Theme {
+        self.theme
+    }
+
+    pub fn resize(&mut self, w: usize, h: usize) {
+        self.size = (w, h);
+        self.comp = frame::Compositor::new(w, h);
+        let _ = self.msg_tx.send(Msg::Resize(w, h));
+    }
+
+    /// Advances one frame; returns what changed.
+    pub fn frame(&mut self) -> display::Dirty {
+        // Newest finished frame, if any (ignoring ones rendered for an old size).
+        if let Some((scene, fade)) = self.scene_rx.try_iter().filter(|(s, _)| self.comp.accepts(s)).last() {
+            self.comp.set_scene(scene, fade);
+        }
+        self.comp.frame()
+    }
+
+    /// Everything must be re-sent (the screen was re-opened).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn invalidate(&mut self) {
+        self.comp.invalidate();
+    }
+
+    pub fn pixels(&self) -> &[u32] {
+        &self.comp.out
+    }
+
+    /// Opens the browser at a page of the (quietly started) setup server,
+    /// e.g. "connect" for Last.fm. No QR code on the display for this.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub fn open_setup_page(&self, path: &str) {
+        if let Err(e) = start_setup(&self.msg_tx) {
+            return eprintln!("{e}");
+        }
+        if let Some(base) = setup::local_url() {
+            mac_app::open_browser(&format!("{base}{path}"));
+        }
+    }
+
+    /// Starts "Connect with VinylVault" for the desktop's sign-in sheet: the
+    /// VinylVault address to open; the answer comes back to the (quietly
+    /// started) local setup server.
+    #[cfg_attr(not(all(feature = "desktop", target_os = "macos")), allow(dead_code))]
+    pub fn vinylvault_connect_url(&self) -> Option<String> {
+        start_setup(&self.msg_tx).ok()?;
+        setup::vinylvault_start(&setup::local_url()?)
+    }
+
+    /// Settings changed outside the setup page: re-read them.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub fn reload(&self) {
+        let _ = self.msg_tx.send(Msg::Reload);
+    }
+
+    pub fn command(&mut self, cmd: Command) {
+        match cmd {
+            Command::Look(t) => {
+                self.theme = t;
+                let _ = settings::save(&[("THEME", Some(t.name()))]);
+                let _ = self.msg_tx.send(Msg::Theme(t));
+            }
+            Command::IdlePreview => {
+                let _ = self.msg_tx.send(Msg::ToggleIdlePreview);
+            }
+            Command::Settings => open_setup(&self.msg_tx, self.browser),
+            _ => {}
+        }
+    }
 }
 
 /// Messages for the compose thread.
@@ -124,7 +239,7 @@ fn lastfm_config() -> Option<lastfm::Config> {
     })
 }
 
-fn display_options(size: Option<(usize, usize)>) -> Result<display::Options, String> {
+fn display_options() -> Result<display::Options, String> {
     let rotate = match env("ROTATE").as_deref() {
         None | Some("auto") => None,
         Some(v) => match v.parse::<u32>() {
@@ -132,7 +247,7 @@ fn display_options(size: Option<(usize, usize)>) -> Result<display::Options, Str
             _ => return Err(format!("ROTATE must be 0, 90, 180 or 270 (got {v})")),
         },
     };
-    Ok(display::Options { size, rotate, connector: env("CONNECTOR") })
+    Ok(display::Options { rotate, connector: env("CONNECTOR") })
 }
 
 struct Look {
@@ -171,7 +286,10 @@ mod mac_app {
 
     /// Opened from Finder/Dock: macOS started it (parent is launchd), no terminal.
     pub fn from_finder() -> bool {
-        cfg!(target_os = "macos") && unsafe { libc::getppid() == 1 && libc::isatty(2) == 0 }
+        #[cfg(target_os = "macos")]
+        return unsafe { libc::getppid() == 1 && libc::isatty(2) == 0 };
+        #[cfg(not(target_os = "macos"))]
+        false
     }
 
     /// From Finder there's no terminal to print to: show a dialog.
@@ -185,14 +303,18 @@ mod mac_app {
     }
 
     pub fn open_browser(url: &str) {
-        if cfg!(target_os = "macos") {
-            let _ = Command::new("open").arg(url).status();
-        }
+        #[cfg(target_os = "macos")]
+        let _ = Command::new("open").arg(url).status();
+        #[cfg(target_os = "windows")]
+        let _ = Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).status();
+        #[cfg(target_os = "linux")]
+        let _ = Command::new("xdg-open").arg(url).status();
     }
 }
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
@@ -206,7 +328,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let opts = display_options(args.size)?;
+    let opts = display_options()?;
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
 
     if let Some(path) = args.snapshot {
@@ -226,66 +348,61 @@ fn run() -> Result<(), String> {
         return snapshot(&fonts, &look, &records, msg_rx, size, args.idle, &path);
     }
 
-    // Not set up yet: open the setup page (and on a Mac, the browser).
-    if lastfm_config().is_none() || args.setup {
-        open_setup(&msg_tx, mac_app::from_finder() || args.setup);
+    // A window if there's a desktop, else straight to the screen (Pi).
+    let desktop = display::desktop_available();
+    let needs_setup = lastfm_config().is_none() || args.setup;
+    // The Mac opens its own settings window instead; elsewhere: the setup
+    // page (QR code on the display, and in the browser on a desktop).
+    let native_settings = desktop && cfg!(target_os = "macos");
+    if needs_setup && !native_settings {
+        open_setup(&msg_tx, desktop);
     }
 
-    let Some(mut display) = wait_for_display(&opts) else { return Ok(()) };
-    let (mut w, mut h) = display.size();
+    #[cfg(feature = "desktop")]
+    if desktop {
+        let size = args.size.unwrap_or((800, 480));
+        let player = Player::start(fonts, look, size, msg_tx, msg_rx, true);
+        return display::run_desktop(player, size, needs_setup && native_settings);
+    }
+    screen_loop(fonts, look, &opts, msg_tx, msg_rx)
+}
 
-    let (scene_tx, scene_rx) = mpsc::channel::<(Scene, bool)>();
-    let tx = msg_tx.clone();
-    thread::spawn(move || compose_loop(fonts, look, (w, h), tx, msg_rx, scene_tx));
-
-    let mut comp = frame::Compositor::new(w, h);
+/// The Pi: draw straight to the screen, re-open it when it's swapped.
+#[cfg(target_os = "linux")]
+fn screen_loop(fonts: fonts::Fonts, look: Look, opts: &display::Options, msg_tx: mpsc::Sender<Msg>, msg_rx: mpsc::Receiver<Msg>) -> Result<(), String> {
+    let Some(mut display) = wait_for_display(opts) else { return Ok(()) };
+    let mut player = Player::start(fonts, look, display.size(), msg_tx, msg_rx, false);
     loop {
-        // Newest finished frame, if any (ignoring ones rendered for an old size).
-        if let Some((scene, fade)) = scene_rx.try_iter().filter(|(s, _)| comp.accepts(s)).last() {
-            comp.set_scene(scene, fade);
-        }
-        let dirty = comp.frame();
-        match display.present(&comp.out, dirty)? {
+        let dirty = player.frame();
+        match display.present(player.pixels(), dirty)? {
             Status::Continue => {}
             Status::Quit => break,
             Status::Lost => {
                 drop(display);
-                let Some(d) = wait_for_display(&opts) else { break };
+                let Some(d) = wait_for_display(opts) else { break };
                 display = d;
-                comp.invalidate();
+                player.invalidate(); // a new screen of a new size is caught below
             }
-            Status::Resized => {}
         }
-        if SETUP.swap(false, Ordering::Relaxed) {
-            open_setup(&msg_tx, false);
+        if take_setup_request() {
+            player.command(Command::Settings);
         }
-        if let Some(k) = display.key() {
-            let msg = match k {
-                '1' => Msg::Theme(Theme::Vinyl),
-                '2' => Msg::Theme(Theme::Poster),
-                '3' => Msg::Theme(Theme::Ambient),
-                's' => {
-                    open_setup(&msg_tx, true);
-                    continue;
-                }
-                _ => Msg::ToggleIdlePreview,
-            };
-            let _ = msg_tx.send(msg);
-        }
-        let (nw, nh) = display.size();
-        if (nw, nh) != (w, h) {
-            (w, h) = (nw, nh);
-            comp = frame::Compositor::new(w, h);
-            if msg_tx.send(Msg::Resize(w, h)).is_err() {
-                break;
-            }
+        let (w, h) = display.size();
+        if (w, h) != player.size() {
+            player.resize(w, h);
         }
     }
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+fn screen_loop(_: fonts::Fonts, _: Look, _: &display::Options, _: mpsc::Sender<Msg>, _: mpsc::Receiver<Msg>) -> Result<(), String> {
+    Err("this build has no window (built without the \"desktop\" feature)".into())
+}
+
 /// Opens the display, waiting (quietly) until a screen is connected.
 /// Returns `None` if asked to quit while waiting.
+#[cfg(target_os = "linux")]
 fn wait_for_display(opts: &display::Options) -> Option<Box<dyn display::Display>> {
     let mut last_err = String::new();
     loop {
@@ -313,17 +430,20 @@ fn until_next_minute() -> Duration {
     Duration::from_millis(60_000 - ms % 60_000 + 50)
 }
 
-/// Starts the setup page (if it isn't open) and tells the display to show its QR code.
-fn open_setup(tx: &mpsc::Sender<Msg>, browser: bool) {
+fn start_setup(tx: &mpsc::Sender<Msg>) -> Result<Option<setup::Started>, String> {
     let t = tx.clone();
-    let started = setup::start(move |e| {
+    setup::start(move |e| {
         let _ = t.send(match e {
             setup::Event::Visited => Msg::SetupVisited,
             setup::Event::Saved => Msg::Reload,
             setup::Event::Closed => Msg::Setup(None),
         });
-    });
-    match started {
+    })
+}
+
+/// Starts the setup page (if it isn't open) and tells the display to show its QR code.
+fn open_setup(tx: &mpsc::Sender<Msg>, browser: bool) {
+    match start_setup(tx) {
         Ok(Some(s)) => {
             eprintln!("setup page: {}", s.url);
             let _ = tx.send(Msg::Setup(Some(s.url)));
