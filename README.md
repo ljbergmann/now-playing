@@ -143,6 +143,7 @@ curl -X POST localhost:9911/mode/stopped       # also: playing, noart, long
 curl -X POST localhost:9911/finish/splatter    # marbled, swirl, galaxy, picture_disc, clear, …
 ```
 
-Other flags: `--snapshot out.png [--idle]` renders one frame to a file, `--bench` times
+`NP_PROFILE=1` prints how long each rendering stage takes. Other flags:
+`--snapshot out.png [--idle]` renders one frame to a file, `--bench` times
 the per-frame work. Environment: `LASTFM_USER`, `LASTFM_API_KEY` (required),
-`POLL_SECS` (default 6), `FONT_REGULAR` / `FONT_BOLD` (font file overrides).
+`POLL_SECS` (default 2; it polls every second around the expected end of a track), `FONT_REGULAR` / `FONT_BOLD` (font file overrides).

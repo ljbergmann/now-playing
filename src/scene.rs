@@ -144,6 +144,7 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
         }
     };
 
+    let p = draw::Prof::new("to_xrgb + bake");
     let mut pixels = draw::to_xrgb(&pm);
     // Bake the spinner into the static frame too (at angle 0), so snapshots and
     // the first frame already show it.
@@ -151,6 +152,7 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
         let under = pixels.clone();
         crate::frame::draw_spinner(&mut pixels, &under, w, sp, 0.0, 256);
     }
+    drop(p);
     Scene {
         pixels,
         alt: extras.alt.as_ref().map(draw::to_xrgb),

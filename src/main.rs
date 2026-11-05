@@ -67,7 +67,7 @@ fn parse_args() -> Result<Args, String> {
                      VINYLVAULT_SHELF your shared VinylVault shelf link or slug: draws your pressing\n     \
                      VINYLVAULT_CATALOGUE  on (default) or off: else draw a real pressing of the album\n     \
                      PROMO            on (default) or off: the small VinylVault mentions\n     \
-                     POLL_SECS        seconds between Last.fm checks (default 6)\n     \
+                     POLL_SECS        seconds between Last.fm checks (default 2; 1 s near a track's end)\n     \
                      ROTATE           0, 90, 180 or 270 (default: what the panel reports, else 0)\n     \
                      CONNECTOR        screen to use, e.g. HDMI-A-1 or DSI-1 (default: first connected)\n     \
                      FONT_LIGHT, FONT_REGULAR, FONT_BOLD, FONT_BLACK   font file overrides\n\n\
@@ -100,7 +100,7 @@ fn lastfm_config() -> Result<lastfm::Config, String> {
         user: env("LASTFM_USER").ok_or("set LASTFM_USER")?,
         api_key: env("LASTFM_API_KEY").ok_or("set LASTFM_API_KEY (free: https://www.last.fm/api/account/create)")?,
         api_url: env("LASTFM_API_URL").unwrap_or_else(|| "https://ws.audioscrobbler.com/2.0/".into()),
-        poll: Duration::from_secs_f32(env("POLL_SECS").and_then(|v| v.parse().ok()).unwrap_or(6.0f32).max(2.0)),
+        poll: Duration::from_secs_f32(env("POLL_SECS").and_then(|v| v.parse().ok()).unwrap_or(2.0f32).clamp(1.0, 60.0)),
     })
 }
 

@@ -17,12 +17,18 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let pal = draw::palette(art);
 
     let mut alt = pm.clone();
+    let p = draw::Prof::new("ambient fields");
     field(pm, art, false, pal);
     field(&mut alt, art, true, pal);
-    let eq = foreground(pm, c, pal);
-    foreground(&mut alt, c, pal);
+    drop(p);
+    // Cover, glow and text are the same on both frames: draw them once on a
+    // transparent layer and lay that over each field.
+    let _p = draw::Prof::new("ambient fg");
+    let mut fg = Pixmap::new(w, h).expect("non-zero size");
+    let eq = foreground(&mut fg, c, pal);
+    draw::over(pm, &fg);
+    draw::over(&mut alt, &fg);
 
-    let _ = (w, h);
     Extras { eq, alt: Some(alt), drift_period: if c.playing { 16.0 } else { 30.0 }, ..Default::default() }
 }
 
@@ -72,7 +78,7 @@ fn foreground(pm: &mut Pixmap, c: &Ctx, pal: draw::Palette) -> Option<crate::sce
         let x = (w - size) / 2.0;
         let r = size * 0.025;
         draw::glow(pm, x, top, size, size, r, size * 0.09, size * 0.02, pal.accent, 0.42);
-        draw::glow(pm, x, top, size, size, r, size * 0.03, size * 0.03, [0, 0, 0], 0.5);
+        draw::glow(pm, x, top, size, size, r, size * 0.07, size * 0.03, [0, 0, 0], 0.32);
         match art {
             Some(a) => draw::draw_cover(pm, a, x, top, size, r),
             None => {

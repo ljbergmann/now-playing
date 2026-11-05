@@ -5,7 +5,7 @@
 //! Runs on the compose thread, once per track. Patterns are seeded from the
 //! pressing's name, so the same record always looks the same.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::TAU;
 
 use image::RgbaImage;
 use tiny_skia::Pixmap;
@@ -80,11 +80,6 @@ fn palette(p: &Pressing) -> Vec<C> {
     cs
 }
 
-/// The two fixed light reflections (shared with the black record).
-pub fn sheen(dx: f32, dy: f32) -> f32 {
-    let a = dy.atan2(dx);
-    (2.0 * (a + PI * 0.25)).cos().max(0.0).powf(10.0) + (2.0 * (a - PI * 0.15)).cos().max(0.0).powf(30.0) * 0.5
-}
 
 pub struct Disc {
     pub texture: Vec<u32>,
@@ -96,7 +91,8 @@ pub fn disc(p: &Pressing, art: Option<&RgbaImage>, size: usize, label_frac: f32)
     let seed = p.name.bytes().fold(2_166_136_261u32, |h, b| (h ^ b as u32).wrapping_mul(16_777_619));
     let cs = palette(p);
     let half = size as f32 / 2.0;
-    let cover = art.map(|a| draw::square(a, size as u32));
+    // The full-size cover is only printed on a picture disc; don't scale it otherwise.
+    let cover = art.filter(|_| p.finish == Finish::PictureDisc).map(|a| draw::square(a, size as u32));
     let label_px = (2.0 * half * label_frac).round().max(4.0) as u32;
     let label = art.map(|a| draw::square(a, label_px));
 
@@ -110,9 +106,10 @@ pub fn disc(p: &Pressing, art: Option<&RgbaImage>, size: usize, label_frac: f32)
         })
         .collect();
 
-    let mut texture = vec![0u32; size * size];
-    let mut mask = vec![0u8; size * size];
-    for j in 0..size {
+    let _p = draw::Prof::new("pressing disc");
+    // Colour in the low 24 bits, coverage in the top 8, split up at the end.
+    let mut argb = vec![0u32; size * size];
+    draw::par_rows(&mut argb, size, |j, row| {
         for i in 0..size {
             let (dx, dy) = (i as f32 + 0.5 - half, j as f32 + 0.5 - half);
             let d = (dx * dx + dy * dy).sqrt();
@@ -216,26 +213,29 @@ pub fn disc(p: &Pressing, art: Option<&RgbaImage>, size: usize, label_frac: f32)
             let hole = (label_frac * half * 0.075 - d + 0.5).clamp(0.0, 1.0);
             c = mix(c, [6.0, 6.0, 6.0], hole);
 
-            texture[j * size + i] = draw::xrgb(c.map(|x| x.clamp(0.0, 255.0) as u8));
-            mask[j * size + i] = (alpha * 255.0) as u8;
+            row[i] = ((alpha * 255.0) as u32) << 24 | draw::xrgb(c.map(|x| x.clamp(0.0, 255.0) as u8));
         }
+    });
+    Disc {
+        texture: argb.iter().map(|v| v & 0x00FF_FFFF).collect(),
+        mask: argb.iter().map(|v| (v >> 24) as u8).collect(),
     }
-    Disc { texture, mask }
 }
 
 /// The fixed layer over the spinning record: reflections, then whatever is
 /// drawn in `top` (the tonearm and its shadow), as ARGB.
 pub fn overlay(size: usize, at: (usize, usize), top: &Pixmap, strength: f32) -> Vec<u32> {
+    let _p = draw::Prof::new("pressing overlay");
     let half = size as f32 / 2.0;
     let (tw, th) = (top.width() as usize, top.height() as usize);
     let tdata = top.data();
     let mut out = vec![0u32; size * size];
-    for j in 0..size {
+    draw::par_rows(&mut out, size, |j, row| {
         for i in 0..size {
             let (dx, dy) = (i as f32 + 0.5 - half, j as f32 + 0.5 - half);
             let rn = (dx * dx + dy * dy).sqrt() / half;
             // Reflection: premultiplied white.
-            let s = if rn <= 1.0 { (sheen(dx, dy) * strength).min(0.6) } else { 0.0 };
+            let s = if rn <= 1.0 { (draw::sheen(dx, dy) * strength).min(0.6) } else { 0.0 };
             let mut p = [255.0 * s, 255.0 * s, 255.0 * s, s];
             // Arm and shadow on top (premultiplied "over").
             let (x, y) = (at.0 + i, at.1 + j);
@@ -252,9 +252,9 @@ pub fn overlay(size: usize, at: (usize, usize), top: &Pixmap, strength: f32) -> 
             if p[3] > 0.0 {
                 let a = p[3];
                 let c = [p[0] / a, p[1] / a, p[2] / a].map(|v| v.clamp(0.0, 255.0) as u32);
-                out[j * size + i] = ((a * 255.0) as u32) << 24 | c[0] << 16 | c[1] << 8 | c[2];
+                row[i] = ((a * 255.0) as u32) << 24 | c[0] << 16 | c[1] << 8 | c[2];
             }
         }
-    }
+    });
     out
 }

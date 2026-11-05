@@ -8,6 +8,61 @@ use image::{RgbaImage, imageops};
 use tiny_skia::{Color, FillRule, GradientStop, LinearGradient, Paint, Path, PathBuilder, Pixmap, Point, Rect, SpreadMode, Transform};
 
 pub type Rgba = [f32; 4];
+
+/// `NP_PROFILE=1` prints how long each rendering stage takes (for tuning on the Pi).
+pub struct Prof(&'static str, std::time::Instant);
+impl Prof {
+    pub fn new(label: &'static str) -> Option<Prof> {
+        std::env::var_os("NP_PROFILE").map(|_| Prof(label, std::time::Instant::now()))
+    }
+}
+impl Drop for Prof {
+    fn drop(&mut self) {
+        eprintln!("  {:<18} {:>7.1} ms", self.0, self.1.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+/// Runs `f(row_index, row)` over the rows of `buf` on several threads. Leaves
+/// one core free so the 60 fps loop never has to wait while a screen renders.
+pub fn par_rows<T: Send>(buf: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    if width == 0 {
+        return;
+    }
+    let rows = buf.len() / width;
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).saturating_sub(1).clamp(1, 8);
+    if threads == 1 || rows < 32 {
+        buf.chunks_mut(width).enumerate().for_each(|(y, row)| f(y, row));
+        return;
+    }
+    let per = rows.div_ceil(threads);
+    std::thread::scope(|s| {
+        for (i, chunk) in buf.chunks_mut(per * width).enumerate() {
+            let f = &f;
+            s.spawn(move || chunk.chunks_mut(width).enumerate().for_each(|(j, row)| f(i * per + j, row)));
+        }
+    });
+}
+
+/// The two fixed light reflections on a record, from the offset to its centre.
+/// Plain arithmetic (double-angle identities, repeated squaring) instead of
+/// atan2/cos/powf: this runs for every pixel of the record.
+#[inline]
+pub fn sheen(dx: f32, dy: f32) -> f32 {
+    let r2 = dx * dx + dy * dy;
+    if r2 <= 0.0 {
+        return 0.0;
+    }
+    let (c2, s2) = ((dx * dx - dy * dy) / r2, 2.0 * dx * dy / r2); // cos 2a, sin 2a
+    // cos(2a + π/2) = -sin 2a, raised to the 10th.
+    let a = (-s2).max(0.0);
+    let (a2, a4) = (a * a, a * a * a * a);
+    let p10 = a4 * a4 * a2;
+    // cos(2a - 0.3π), raised to the 30th.
+    let b = (c2 * 0.587_785 + s2 * 0.809_017).max(0.0);
+    let (b2, b4) = (b * b, b * b * b * b);
+    let (b8, b16) = (b4 * b4, b4 * b4 * b4 * b4);
+    p10 + b16 * b8 * b4 * b2 * 0.5
+}
 pub const WHITE: Rgba = [1.0, 1.0, 1.0, 1.0];
 pub const DIM: Rgba = [1.0, 1.0, 1.0, 0.66];
 pub const FAINT: Rgba = [1.0, 1.0, 1.0, 0.45];
@@ -67,11 +122,12 @@ pub fn draw_text(pm: &mut Pixmap, font: &FontVec, px: f32, x: f32, top: f32, s: 
             }
             let a = (cov.min(1.0) * color[3]).clamp(0.0, 1.0);
             let i = ((dy * pw + dx) * 4) as usize;
+            // Premultiplied "over": correct on opaque and on transparent layers.
             for ch in 0..3 {
                 let d = data[i + ch] as f32;
                 data[i + ch] = (color[ch] * 255.0 * a + d * (1.0 - a)).round() as u8;
             }
-            data[i + 3] = 255;
+            data[i + 3] = (255.0 * a + data[i + 3] as f32 * (1.0 - a)).round() as u8;
         });
     }
     cx - x - if s.is_empty() { 0.0 } else { tracking }
@@ -205,14 +261,69 @@ pub fn rounded(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
 }
 
 /// A soft drop shadow / glow: stacked translucent rounded rects.
+/// A soft glow/shadow around a rounded rect, in one parallel pass: each pixel's
+/// strength comes from its distance to the shape (no stacked path fills).
 pub fn glow(pm: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, r: f32, spread: f32, dy: f32, color: [u8; 3], alpha: f32) {
-    let steps = 20;
-    for i in (1..=steps).rev() {
-        let g = spread * i as f32 / steps as f32;
-        if let Some(p) = rounded(x - g, y - g + dy, w + 2.0 * g, h + 2.0 * g, r + g) {
-            fill(pm, &p, Color::from_rgba8(color[0], color[1], color[2], (alpha / steps as f32 * 255.0) as u8));
+    let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+    let y = y + dy;
+    let (x0, x1) = (((x - spread).floor() as i32).max(0), ((x + w + spread).ceil() as i32).min(pw));
+    let (y0, y1) = (((y - spread).floor() as i32).max(0), ((y + h + spread).ceil() as i32).min(ph));
+    let (cx, cy, hx, hy) = (x + w / 2.0, y + h / 2.0, w / 2.0 - r, h / 2.0 - r);
+    let col = color.map(|c| c as f32);
+    par_rows(pm.data_mut(), pw as usize * 4, |py, row| {
+        let py = py as i32;
+        if py < y0 || py >= y1 {
+            return;
         }
-    }
+        let qy = ((py as f32 + 0.5 - cy).abs() - hy).max(0.0);
+        for px in x0..x1 {
+            let qx = ((px as f32 + 0.5 - cx).abs() - hx).max(0.0);
+            let dist = (qx * qx + qy * qy).sqrt() - r; // <0 inside the shape
+            let t = (1.0 - dist.max(0.0) / spread).clamp(0.0, 1.0);
+            let a = alpha * t * t; // fades out smoothly
+            if a <= 0.002 {
+                continue;
+            }
+            let i = px as usize * 4;
+            for c in 0..3 {
+                row[i + c] = (col[c] * a + row[i + c] as f32 * (1.0 - a)) as u8;
+            }
+            row[i + 3] = (255.0 * a + row[i + 3] as f32 * (1.0 - a)) as u8;
+        }
+    });
+}
+
+/// Darkens/tints the whole pixmap towards `color` by `alpha` (one parallel pass).
+pub fn shade(pm: &mut Pixmap, color: [u8; 3], alpha: f32) {
+    let w = pm.width() as usize * 4;
+    let col = color.map(|c| c as f32 * alpha);
+    par_rows(pm.data_mut(), w, |_, row| {
+        for p in row.chunks_exact_mut(4) {
+            for c in 0..3 {
+                p[c] = (col[c] + p[c] as f32 * (1.0 - alpha)) as u8;
+            }
+        }
+    });
+}
+
+/// Lays a premultiplied layer of the same size over `dst` (parallel, skips
+/// empty pixels). Much cheaper than a general compositing pipeline.
+pub fn over(dst: &mut Pixmap, src: &Pixmap) {
+    let w = dst.width() as usize * 4;
+    let s = src.data();
+    par_rows(dst.data_mut(), w, |y, row| {
+        let srow = &s[y * w..(y + 1) * w];
+        for (d, p) in row.chunks_exact_mut(4).zip(srow.chunks_exact(4)) {
+            let a = p[3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let ia = 255 - a;
+            for c in 0..4 {
+                d[c] = (p[c] as u32 + (d[c] as u32 * ia + 127) / 255).min(255) as u8;
+            }
+        }
+    });
 }
 
 /// Draws a square image (pre-scaled to `size`) clipped to a rounded rect.
@@ -232,12 +343,25 @@ pub fn draw_cover(pm: &mut Pixmap, art: &RgbaImage, x: f32, y: f32, size: f32, r
     pm.fill_path(&shape, &paint, FillRule::Winding, Transform::identity(), None);
 }
 
-/// Centre-crops to a square and scales to `px` with a good filter.
+/// Scales with a filter that's good *and* cheap for the direction: area
+/// averaging when shrinking (covers are 770 px, screens show them smaller),
+/// bilinear when enlarging.
+pub fn scale(img: &RgbaImage, w: u32, h: u32) -> RgbaImage {
+    if (w, h) == img.dimensions() {
+        img.clone()
+    } else if w <= img.width() && h <= img.height() {
+        imageops::thumbnail(img, w.max(1), h.max(1))
+    } else {
+        imageops::resize(img, w.max(1), h.max(1), imageops::FilterType::Triangle)
+    }
+}
+
+/// Centre-crops to a square and scales to `px`.
 pub fn square(art: &RgbaImage, px: u32) -> RgbaImage {
     let (aw, ah) = art.dimensions();
     let side = aw.min(ah);
     let sq = imageops::crop_imm(art, (aw - side) / 2, (ah - side) / 2, side, side).to_image();
-    imageops::resize(&sq, px, px, imageops::FilterType::CatmullRom)
+    scale(&sq, px, px)
 }
 
 /// Scales `art` to cover a w×h area (crop the overflow), like CSS object-fit: cover.
@@ -249,20 +373,64 @@ pub fn cover_fill(art: &RgbaImage, w: u32, h: u32, focus_y: f32) -> RgbaImage {
     let x0 = ((aw - cw) / 2.0) as u32;
     let y0 = ((ah - ch) * focus_y.clamp(0.0, 1.0)) as u32;
     let crop = imageops::crop_imm(art, x0, y0, cw as u32, ch as u32).to_image();
-    imageops::resize(&crop, w, h, imageops::FilterType::CatmullRom)
+    scale(&crop, w, h)
 }
 
 /// Blurs at 48 px and scales up: a smooth colour field from the cover.
 pub fn blurred(art: &RgbaImage, w: u32, h: u32, sigma: f32) -> RgbaImage {
-    let small = imageops::resize(art, 48, 48, imageops::FilterType::Triangle);
+    let small = imageops::thumbnail(art, 48, 48);
     let soft = imageops::blur(&small, sigma);
-    imageops::resize(&soft, w, h, imageops::FilterType::CatmullRom)
+    upscale(&soft, w, h)
 }
 
+/// Bilinear enlargement of a small, smooth image, in parallel. Plenty for
+/// blurred colour fields, and far cheaper than a general resampler.
+pub fn upscale(src: &RgbaImage, w: u32, h: u32) -> RgbaImage {
+    let (sw, sh) = (src.width() as usize, src.height() as usize);
+    let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+    let s = src.as_raw();
+    let mut out = vec![0u8; w * h * 4];
+    let (fx, fy) = (sw as f32 / w as f32, sh as f32 / h as f32);
+    par_rows(&mut out, w * 4, |y, row| {
+        let syf = ((y as f32 + 0.5) * fy - 0.5).clamp(0.0, (sh - 1) as f32);
+        let (y0, ty) = (syf as usize, syf.fract());
+        let y1 = (y0 + 1).min(sh - 1);
+        for x in 0..w {
+            let sxf = ((x as f32 + 0.5) * fx - 0.5).clamp(0.0, (sw - 1) as f32);
+            let (x0, tx) = (sxf as usize, sxf.fract());
+            let x1 = (x0 + 1).min(sw - 1);
+            for c in 0..4 {
+                let p = |xx: usize, yy: usize| s[(yy * sw + xx) * 4 + c] as f32;
+                let top = p(x0, y0) + (p(x1, y0) - p(x0, y0)) * tx;
+                let bot = p(x0, y1) + (p(x1, y1) - p(x0, y1)) * tx;
+                row[x * 4 + c] = (top + (bot - top) * ty) as u8;
+            }
+        }
+    });
+    RgbaImage::from_raw(w as u32, h as u32, out).expect("sized buffer")
+}
+
+/// Copies an opaque image onto the pixmap at (x, y), clipped (parallel).
 pub fn blit(pm: &mut Pixmap, img: &RgbaImage, x: i32, y: i32) {
-    if let Some(p) = to_pixmap(img) {
-        pm.draw_pixmap(x, y, p.as_ref(), &Default::default(), Transform::identity(), None);
+    let (pw, ph) = (pm.width() as i32, pm.height() as i32);
+    let (iw, ih) = (img.width() as i32, img.height() as i32);
+    let (x0, x1) = (x.max(0), (x + iw).min(pw));
+    if x0 >= x1 {
+        return;
     }
+    let src = img.as_raw();
+    par_rows(pm.data_mut(), pw as usize * 4, |py, row| {
+        let (py, sy) = (py as i32, py as i32 - y);
+        if sy < 0 || sy >= ih || py >= ph {
+            return;
+        }
+        let s0 = ((sy * iw + (x0 - x)) * 4) as usize;
+        let n = ((x1 - x0) * 4) as usize;
+        row[(x0 * 4) as usize..(x0 * 4) as usize + n].copy_from_slice(&src[s0..s0 + n]);
+        for p in row[(x0 * 4) as usize..(x0 * 4) as usize + n].chunks_exact_mut(4) {
+            p[3] = 255; // covers and colour fields are opaque
+        }
+    });
 }
 
 pub fn to_pixmap(img: &RgbaImage) -> Option<Pixmap> {
@@ -432,6 +600,36 @@ pub fn ago(now: SystemTime, at: SystemTime) -> String {
                 let d = (h as f64 / 24.0).round() as u64;
                 if d == 1 { "yesterday".into() } else { format!("{d} days ago") }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::PI;
+
+    /// The arithmetic version must match the original trigonometric one.
+    #[test]
+    fn sheen_matches_trig_version() {
+        let trig = |dx: f32, dy: f32| {
+            let a = dy.atan2(dx);
+            (2.0 * (a + PI * 0.25)).cos().max(0.0).powf(10.0) + (2.0 * (a - PI * 0.15)).cos().max(0.0).powf(30.0) * 0.5
+        };
+        for k in 0..720 {
+            let a = k as f32 * PI / 360.0;
+            let (dx, dy) = (a.cos() * 37.0, a.sin() * 37.0);
+            assert!((sheen(dx, dy) - trig(dx, dy)).abs() < 1e-3, "angle {k}");
+        }
+        assert_eq!(sheen(0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn par_rows_visits_every_row_once() {
+        let mut buf = vec![0u32; 7 * 1000];
+        par_rows(&mut buf, 7, |y, row| row.iter_mut().for_each(|v| *v += y as u32 + 1));
+        for (y, row) in buf.chunks(7).enumerate() {
+            assert!(row.iter().all(|&v| v == y as u32 + 1));
         }
     }
 }

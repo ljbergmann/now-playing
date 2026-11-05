@@ -221,6 +221,10 @@ pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
         let mut last: Option<(String, String, String, String, bool, Option<SystemTime>)> = None;
         let mut art_cache: Option<(String, Option<std::sync::Arc<RgbaImage>>)> = None;
         let mut failures: u32 = 0;
+        // The playing track as first seen, and its length, for timing the polls.
+        let mut current: Option<(String, String)> = None;
+        let mut since = std::time::Instant::now();
+        let mut duration: Option<Duration> = None;
 
         loop {
             let result = get(&agent, &url)
@@ -246,8 +250,15 @@ pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
                             };
                             t
                         });
+                        let playing = track.as_ref().filter(|t| t.playing).map(|t| (t.artist.clone(), t.title.clone()));
                         if !send(Update::Track(track)) {
                             return;
+                        }
+                        // After sending: the length is only for timing the next polls.
+                        if playing != current {
+                            since = std::time::Instant::now();
+                            duration = playing.as_ref().and_then(|(a, t)| fetch_duration(&agent, &cfg, a, t));
+                            current = playing;
                         }
                     }
                 }
@@ -263,13 +274,54 @@ pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
             }
             // Back off gently while the network or API is unhappy.
             let wait = if failures == 0 {
-                cfg.poll
+                let d = if current.is_some() { duration } else { None };
+                next_wait(cfg.poll, since.elapsed(), d)
             } else {
                 (cfg.poll * 2u32.saturating_pow(failures.min(5))).min(Duration::from_secs(60))
             };
             thread::sleep(wait);
         }
     });
+}
+
+/// Track length in Last.fm's catalogue (often missing, then `None`).
+fn fetch_duration(agent: &ureq::Agent, cfg: &Config, artist: &str, title: &str) -> Option<Duration> {
+    let url = format!(
+        "{}?method=track.getInfo&artist={}&track={}&api_key={}&format=json",
+        cfg.api_url,
+        encode(artist),
+        encode(title),
+        encode(&cfg.api_key)
+    );
+    let body = get(agent, &url).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    let ms = match &v["track"]["duration"] {
+        serde_json::Value::String(s) => s.parse::<u64>().ok()?,
+        serde_json::Value::Number(n) => n.as_u64()?,
+        _ => return None,
+    };
+    (ms >= 20_000 && ms <= 3 * 3_600_000).then(|| Duration::from_millis(ms))
+}
+
+/// How long to wait before asking Last.fm again.
+///
+/// Track changes almost always happen when a track ends (or on a skip). We
+/// first see a track a little after it really started, so its end comes a
+/// little after `elapsed == duration`: around that moment, ask every second.
+/// Otherwise use the base interval.
+fn next_wait(base: Duration, elapsed: Duration, duration: Option<Duration>) -> Duration {
+    const FAST: Duration = Duration::from_secs(1);
+    let Some(d) = duration else { return base };
+    let window_start = d.saturating_sub(Duration::from_secs(6));
+    let window_end = d + Duration::from_secs(25); // paused or long gap: stop hurrying
+    if elapsed >= window_start && elapsed <= window_end {
+        FAST.min(base)
+    } else if elapsed < window_start {
+        // Don't sleep past the start of the window.
+        base.min(window_start - elapsed).max(Duration::from_millis(500))
+    } else {
+        base
+    }
 }
 
 fn encode(s: &str) -> String {
@@ -304,6 +356,20 @@ mod tests {
         assert!(!t.playing);
         assert!(t.art_url.is_empty());
         assert_eq!(t.played_at, Some(UNIX_EPOCH + Duration::from_secs(1_700_000_000)));
+    }
+
+    #[test]
+    fn polls_fast_around_the_end_of_a_track() {
+        let s = Duration::from_secs;
+        let base = s(2);
+        let len = Some(s(200));
+        assert_eq!(next_wait(base, s(10), None), base); // unknown length
+        assert_eq!(next_wait(base, s(10), len), base); // mid-track
+        assert_eq!(next_wait(base, s(193), len), s(1)); // stops at the window start
+        assert_eq!(next_wait(base, s(194), len), s(1)); // inside the window
+        assert_eq!(next_wait(base, s(215), len), s(1)); // a bit late: still fast
+        assert_eq!(next_wait(base, s(240), len), base); // paused: back to normal
+        assert_eq!(next_wait(s(5), s(190), len), s(4)); // never sleeps into the window
     }
 
     #[test]

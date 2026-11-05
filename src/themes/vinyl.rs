@@ -6,7 +6,6 @@
 //! highlights look the same at every angle). Your own coloured pressing from
 //! VinylVault: the whole record rotates under a fixed reflection/arm layer.
 
-use std::f32::consts::PI;
 
 use tiny_skia::{Color, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
@@ -24,11 +23,13 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let stacked = w < h * 1.2;
 
     // Background: near-black, faintly tinted by the cover.
+    let p = draw::Prof::new("vinyl background");
     pm.fill(draw::color([10, 9, 9]));
     if let Some(a) = art {
         draw::blit(pm, &draw::blurred(a, w as u32, h as u32, 8.0), 0, 0);
-        draw::fill_rect(pm, 0.0, 0.0, w, h, Color::from_rgba8(9, 8, 8, 214));
+        draw::shade(pm, [9, 8, 8], 214.0 / 255.0);
     }
+    drop(p);
 
     // Geometry: record left (or top), text right (or below). The arm needs
     // ~0.2 d to the right of the record.
@@ -50,8 +51,11 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     }
 
     // The tonearm on its own layer: it must stay on top of a spinning record.
+    let p = draw::Prof::new("tonearm");
     let mut arm = Pixmap::new(pm.width(), pm.height()).expect("non-zero size");
     draw_tonearm(&mut arm, cx, cy, d, c.playing);
+    drop(p);
+    let p = draw::Prof::new("record");
 
     let mut spinner = match c.pressing {
         // Your pressing: the whole record turns (a marble or splatter visibly
@@ -72,7 +76,10 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
         }
     };
     spinner.spinning = c.playing;
-    pm.draw_pixmap(0, 0, arm.as_ref(), &Default::default(), Transform::identity(), None);
+    // Draw the arm again straight onto the frame (cheaper than compositing the layer).
+    draw_tonearm(pm, cx, cy, d, c.playing);
+    drop(p);
+    let _p = draw::Prof::new("text");
 
     // Text side.
     let (cx0, cw, top, bottom) = col;
@@ -153,8 +160,11 @@ fn draw_record(pm: &mut Pixmap, cx: f32, cy: f32, r: f32) {
     let y0 = ((cy - r - 1.0).floor() as i32).max(0);
     let y1 = ((cy + r + 1.0).ceil() as i32).min(ph);
     let gaps = [0.52, 0.64, 0.75, 0.86];
-    let data = pm.data_mut();
-    for y in y0..y1 {
+    draw::par_rows(pm.data_mut(), pw as usize * 4, |y, row| {
+        let y = y as i32;
+        if y < y0 || y >= y1 {
+            return;
+        }
         for x in x0..x1 {
             let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
             let dist = (dx * dx + dy * dy).sqrt();
@@ -177,22 +187,20 @@ fn draw_record(pm: &mut Pixmap, cx: f32, cy: f32, r: f32) {
                 l = 13.0; // smooth run-out around the label
             }
             // Two reflections at fixed angles (the room light), strongest on the grooves.
-            let a = dy.atan2(dx);
-            let sheen = (2.0 * (a + PI * 0.25)).cos().max(0.0).powf(10.0);
-            let sheen2 = (2.0 * (a - PI * 0.15)).cos().max(0.0).powf(30.0) * 0.5;
+            let sheen = draw::sheen(dx, dy);
             if grooved || rn >= 0.965 {
-                l += (sheen + sheen2) * 46.0 * (0.75 + 0.25 * (dist * 2.1).sin().abs());
+                l += sheen * 46.0 * (0.75 + 0.25 * (dist * 2.1).sin().abs());
             } else {
-                l += (sheen + sheen2) * 14.0;
+                l += sheen * 14.0;
             }
             let (cr, cg, cb) = (l * 1.0, l * 0.985, l * 0.97);
-            let i = ((y * pw + x) * 4) as usize;
+            let i = (x * 4) as usize;
             for (k, v) in [cr, cg, cb].into_iter().enumerate() {
-                let dst = data[i + k] as f32;
-                data[i + k] = (v.clamp(0.0, 255.0) * cov + dst * (1.0 - cov)) as u8;
+                let dst = row[i + k] as f32;
+                row[i + k] = (v.clamp(0.0, 255.0) * cov + dst * (1.0 - cov)) as u8;
             }
         }
-    }
+    });
 }
 
 /// The cover as a round label with a spindle hole, ready to rotate.
