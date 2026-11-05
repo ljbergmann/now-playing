@@ -22,12 +22,13 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let pal = draw::palette(art);
     let stacked = w < h * 1.2;
 
-    // Background: near-black, faintly tinted by the cover.
+    // Background: dark, with a soft glow of the cover's colours (dithered,
+    // so it stays smooth on big screens).
     let p = draw::Prof::new("vinyl background");
     pm.fill(draw::color([10, 9, 9]));
     if let Some(a) = art {
         draw::blit(pm, &draw::blurred(a, w as u32, h as u32, 8.0), 0, 0);
-        draw::shade(pm, [9, 8, 8], 214.0 / 255.0);
+        draw::shade(pm, [9, 8, 8], 190.0 / 255.0);
     }
     drop(p);
 
