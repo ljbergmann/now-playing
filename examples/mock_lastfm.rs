@@ -1,0 +1,75 @@
+//! Fake Last.fm for development: `cargo run --example mock_lastfm`
+//! then run the display with LASTFM_API_URL=http://localhost:9911/2.0/
+//!
+//! Switch scenarios with: curl -X POST localhost:9911/mode/<playing|stopped|noart|long>
+
+use std::io::Cursor;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tiny_http::{Header, Method, Response, Server};
+
+fn art(hue: f32) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(600, 600, |x, y| {
+        let t = (x + y) as f32 / 1200.0;
+        let (r, g, b) = hsl((hue + 60.0 * t) % 360.0, 0.65, 0.55 - 0.3 * t);
+        let (dx, dy) = (x as f32 - 210.0, y as f32 - 370.0);
+        if dx * dx + dy * dy < 130.0 * 130.0 {
+            let (r2, g2, b2) = hsl((hue + 180.0) % 360.0, 0.8, 0.85);
+            image::Rgb([((r + r2) / 2.0) as u8, ((g + g2) / 2.0) as u8, ((b + b2) / 2.0) as u8])
+        } else {
+            image::Rgb([r as u8, g as u8, b as u8])
+        }
+    });
+    let mut out = Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+fn hsl(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match (h / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    ((r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0)
+}
+
+fn main() {
+    let server = Server::http("127.0.0.1:9911").unwrap();
+    println!("mock Last.fm on http://localhost:9911/2.0/");
+    let mut mode = String::from("playing");
+    for req in server.incoming_requests() {
+        let url = req.url().to_string();
+        if *req.method() == Method::Post && url.starts_with("/mode/") {
+            mode = url[6..].to_string();
+            let _ = req.respond(Response::from_string(mode.clone()));
+            continue;
+        }
+        if url.starts_with("/i/u/") {
+            // Track-specific art; the 770px size exists, like on the real CDN.
+            let hue = if url.contains("b.png") { 20.0 } else { 280.0 };
+            let png = Header::from_bytes("Content-Type", "image/png").unwrap();
+            let _ = req.respond(Response::from_data(art(hue)).with_header(png));
+            continue;
+        }
+        let base = "http://localhost:9911/i/u/300x300/";
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let (name, artist, img, extra) = match mode.as_str() {
+            "stopped" => ("Slow Burn", "Kacey Lane", format!("{base}b.png"), format!(r#","date":{{"uts":"{}"}}"#, now - 14 * 60)),
+            "noart" => ("Untitled Demo", "Unknown Artist", format!("{base}2a96cbd8b46e442fc41c2b86b821562f.png"), r#","@attr":{"nowplaying":"true"}"#.into()),
+            "long" => ("A Remarkably Long Song Title That Keeps Going Well Past Two Lines Of Text On Small Screens", "Orchestra of the Very Long Name and Friends", format!("{base}a.png"), r#","@attr":{"nowplaying":"true"}"#.into()),
+            _ => ("Ultraviolet Hours (Extended Version)", "Elsa Morrow & The Night Shift", format!("{base}a.png"), r#","@attr":{"nowplaying":"true"}"#.into()),
+        };
+        let body = format!(
+            r##"{{"recenttracks":{{"track":[{{"name":"{name}","artist":{{"#text":"{artist}"}},"album":{{"#text":"Signals From the Lake"}},"image":[{{"size":"small","#text":"{img}"}},{{"size":"extralarge","#text":"{img}"}}]{extra}}}]}}}}"##
+        );
+        let json = Header::from_bytes("Content-Type", "application/json").unwrap();
+        let _ = req.respond(Response::from_string(body).with_header(json));
+    }
+}
