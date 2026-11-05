@@ -134,6 +134,7 @@ or edit `/etc/now-playing/env` and `sudo systemctl restart now-playing`:
 | `VINYLVAULT_SHELF` | your shared VinylVault shelf link or slug (optional) |
 | `VINYLVAULT_CATALOGUE` | `on` (default) or `off`: catalogue pressings for albums not on your shelf |
 | `PROMO` | `on` (default) or `off`: the small VinylVault mark on the clock screen and "via VinylVault" under pressings |
+| `STATS` | `on` (default) or `off`: one quiet line under the playing track with your Last.fm numbers, e.g. "♥ · 38th play · 1,204 plays of Ariana Grande" |
 | `ROTATE` | `0`, `90`, `180`, `270` (clockwise), or `auto` (default) |
 | `CONNECTOR` | e.g. `HDMI-A-1`, `DSI-1` (default: first connected screen) |
 

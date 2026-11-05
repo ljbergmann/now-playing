@@ -42,6 +42,7 @@ sudo install -m 600 /dev/null /etc/now-playing/env
 sudo tee /etc/now-playing/env >/dev/null <<EOF
 ${VINYLVAULT_CATALOGUE:+VINYLVAULT_CATALOGUE=$VINYLVAULT_CATALOGUE}
 ${PROMO:+PROMO=$PROMO}
+${STATS:+STATS=$STATS}
 ${ROTATE:+ROTATE=$ROTATE}
 ${CONNECTOR:+CONNECTOR=$CONNECTOR}
 EOF

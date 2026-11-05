@@ -4,8 +4,8 @@
 
 use tiny_skia::{Color, Pixmap};
 
-use crate::draw::{self, Align, DIM, WHITE, clamp};
-use crate::scene::{Ctx, Extras, Item, draw_stack, size_to_width, stack_height};
+use crate::draw::{self, Align, DIM, FAINT, WHITE, clamp};
+use crate::scene::{self, Ctx, Extras, Item, draw_stack, size_to_width, stack_height};
 
 pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let (w, h) = (pm.width() as f32, pm.height() as f32);
@@ -37,6 +37,8 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let f = c.fonts;
     let col = (pad, w - 2.0 * pad);
     let mut items = Vec::new();
+    // The play-count line arrives a moment after the track.
+    let mut late = None;
     if c.playing {
         let t = c.track.expect("playing implies a track");
         let max_px = if stacked { h * 0.075 } else { h * 0.19 };
@@ -46,6 +48,16 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
             items.push(Item::new(&f.black, px, l.clone(), WHITE).track(-0.02).gap(if i == 0 { 0.3 * px } else { -0.2 * px }));
         }
         items.push(Item::new(&f.bold, clamp(12.0, 3.6 * vmin, 34.0), t.artist.to_uppercase(), DIM).track(0.14).gap(0.15 * px));
+        if let Some(it) = scene::stats_item(&f.regular, clamp(10.0, 2.2 * vmin, 18.0), t, FAINT) {
+            // Into the bottom margin if there's room, so the type above doesn't
+            // jump up when it arrives; on small screens it joins the block.
+            let it = it.gap(0.12 * pad);
+            if it.gap + draw::line_h(it.px) <= 0.6 * pad {
+                late = Some(it);
+            } else {
+                items.push(it.gap(0.06 * px));
+            }
+        }
     } else {
         let clk = draw::clock(c.now, c.twelve_hour);
         let clock_px = size_to_width(&f.black, "88:88", col.1 * if stacked { 0.9 } else { 0.62 }, h * 0.42, -0.03);
@@ -64,6 +76,9 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let y = h - pad - block;
     draw::fill_rect(pm, col.0, y - rule_h - 0.8 * pad, clamp(40.0, 14.0 * vmin, 160.0), rule_h, draw::color(pal.accent));
     let eq = draw_stack(pm, &items, col, y, Align::Left);
+    if let Some(it) = late {
+        draw_stack(pm, &[it], col, h - pad, Align::Left);
+    }
 
     Extras { eq, ..Default::default() }
 }

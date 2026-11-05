@@ -9,7 +9,7 @@ use image::{RgbaImage, imageops};
 use tiny_skia::{Color, Pixmap};
 
 use crate::draw::{self, Align, DIM, FAINT, WHITE, clamp};
-use crate::scene::{Ctx, Extras, Item, draw_stack, size_to_width, stack_height};
+use crate::scene::{self, Ctx, Extras, Item, draw_stack, size_to_width, stack_height};
 
 pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let (w, h) = (pm.width(), pm.height());
@@ -68,13 +68,29 @@ fn foreground(pm: &mut Pixmap, c: &Ctx, pal: draw::Palette) -> Option<crate::sce
 
     if c.playing {
         let t = c.track.expect("playing implies a track");
-        let items = vec![
+        let mut items = vec![
             Item::new(&f.regular, clamp(16.0, 4.6 * vmin, 44.0), t.title.clone(), WHITE).eq(true),
             Item::new(&f.light, clamp(13.0, 3.4 * vmin, 32.0), t.artist.clone(), DIM).gap(2.0),
         ];
-        let text_h = stack_height(&items);
-        let size = (h - 2.0 * pad - text_h - pad * 0.8).min(w * 0.62).max(40.0);
-        let top = (h - (size + pad * 0.8 + text_h)) / 2.0;
+        let layout = |items: &[Item]| {
+            let text_h = stack_height(items);
+            let size = (h - 2.0 * pad - text_h - pad * 0.8).min(w * 0.62).max(40.0);
+            (text_h, size, (h - (size + pad * 0.8 + text_h)) / 2.0)
+        };
+        let (mut text_h, mut size, mut top) = layout(&items);
+        // The play-count line arrives a moment after the track. It goes under
+        // the artist, into the bottom margin if there's room (the cover
+        // doesn't shrink when it appears); on small screens it joins the text.
+        let mut late = None;
+        if let Some(it) = scene::stats_item(&f.light, clamp(10.0, 2.4 * vmin, 22.0), t, FAINT) {
+            let it = it.gap(0.15 * pad);
+            if it.gap + draw::line_h(it.px) <= 0.6 * top {
+                late = Some(it);
+            } else {
+                items.push(it.gap(2.0));
+                (text_h, size, top) = layout(&items);
+            }
+        }
         let x = (w - size) / 2.0;
         let r = size * 0.025;
         draw::glow(pm, x, top, size, size, r, size * 0.09, size * 0.02, pal.accent, 0.42);
@@ -87,7 +103,11 @@ fn foreground(pm: &mut Pixmap, c: &Ctx, pal: draw::Palette) -> Option<crate::sce
                 }
             }
         }
-        draw_stack(pm, &items, col, top + size + pad * 0.8, Align::Center)
+        let eq = draw_stack(pm, &items, col, top + size + pad * 0.8, Align::Center);
+        if let Some(it) = late {
+            draw_stack(pm, &[it], col, top + size + pad * 0.8 + text_h, Align::Center);
+        }
+        eq
     } else {
         let clk = draw::clock(c.now, c.twelve_hour);
         let clock_px = size_to_width(&f.light, "88:88", col.1 * 0.62, h * 0.34, -0.02);
