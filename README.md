@@ -106,7 +106,8 @@ ssh <user>@<pi-name>.local 'bash now-playing/pi/install.sh && sudo reboot'
 
 3. The screen shows a QR code. Scan it with your phone: a small page served by
    the display (only reachable with the code in the QR) asks for your Last.fm
-   user name, optionally your VinylVault shelf link, and the look; the display
+   user name (or tap "Connect with Last.fm"), optionally VinylVault ("Connect
+   with VinylVault", or a shared shelf link), and the look; the display
    changes as you tap. To open it again: `sudo systemctl kill -s USR1 now-playing`.
 
 On the Pi: `systemctl status now-playing`, live log `journalctl -u now-playing -f`.

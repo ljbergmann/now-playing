@@ -218,7 +218,7 @@ fn run() -> Result<(), String> {
         let cfg = lastfm_config().ok_or("Last.fm isn't set up yet: start it without --snapshot and use the setup page")?;
         let tx = msg_tx.clone();
         lastfm::spawn(cfg, Default::default(), move |u| tx.send(Msg::Lastfm(u)).is_ok());
-        let shelf = match env("VINYLVAULT_SHELF") {
+        let shelf = match vinylvault::source() {
             Some(s) => Some(vinylvault::load_once(&s)?),
             None => None,
         };
@@ -339,7 +339,7 @@ fn open_setup(tx: &mpsc::Sender<Msg>, browser: bool) {
 fn catalogue() -> Option<vinylvault::Catalogue> {
     match env("VINYLVAULT_CATALOGUE").as_deref() {
         Some("off" | "0" | "false" | "no") => None,
-        _ => Some(vinylvault::Catalogue::new(&vinylvault::base_url(env("VINYLVAULT_SHELF").as_deref()))),
+        _ => Some(vinylvault::Catalogue::new(&vinylvault::site())),
     }
 }
 
@@ -385,13 +385,13 @@ impl Poller {
     }
 }
 
-fn spawn_shelf(tx: &mpsc::Sender<Msg>) -> (Option<String>, Option<vinylvault::Shelf>) {
-    let setting = env("VINYLVAULT_SHELF");
-    let shelf = setting.as_ref().map(|s| {
+fn spawn_shelf(tx: &mpsc::Sender<Msg>) -> (Option<vinylvault::Source>, Option<vinylvault::Shelf>) {
+    let src = vinylvault::source();
+    let shelf = src.clone().map(|s| {
         let tx = tx.clone();
         vinylvault::spawn(s, move || tx.send(Msg::ShelfUpdated).is_ok())
     });
-    (setting, shelf)
+    (src, shelf)
 }
 
 fn compose_loop(
@@ -469,7 +469,14 @@ fn compose_loop(
             }
             Ok(Msg::Theme(t)) => look.theme = t,
             Ok(Msg::ToggleIdlePreview) => preview_idle = !preview_idle,
-            Ok(Msg::ShelfUpdated) => {}
+            Ok(Msg::ShelfUpdated) => {
+                // The pass may have been dropped (display disconnected in VinylVault).
+                if vinylvault::source() != shelf_setting {
+                    let (setting, shelf) = spawn_shelf(&me);
+                    shelf_setting = setting;
+                    records = Records { shelf, catalogue: catalogue() };
+                }
+            }
             Ok(Msg::Reload) => {
                 if let Ok(l) = self::look() {
                     look = l;
@@ -477,7 +484,7 @@ fn compose_loop(
                 if poller.sync(&me) {
                     (track, error) = (None, None);
                 }
-                if env("VINYLVAULT_SHELF") != shelf_setting {
+                if vinylvault::source() != shelf_setting {
                     let (setting, shelf) = spawn_shelf(&me);
                     shelf_setting = setting;
                     records = Records { shelf, catalogue: catalogue() };

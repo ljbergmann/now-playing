@@ -27,6 +27,8 @@
   .seg input:focus-visible + span { outline:2px solid var(--accent); }
   button { width:100%; padding:14px; font-size:16px; font-weight:600; border:0; border-radius:12px; cursor:pointer; background:var(--accent); color:#1a0d06; margin-top:6px; }
   a.connect { display:block; text-align:center; text-decoration:none; padding:14px; font-weight:600; border-radius:12px; background:#d51007; color:#fff; }
+  a.connect.vv { background:var(--accent); color:#1a0d06; }
+  .ok { color:var(--ok); }
   .or { text-align:center; color:var(--dim); font-size:13px; margin:14px 0 2px; }
   button.quiet { background:transparent; color:var(--dim); border:1px solid var(--line); font-weight:500; }
   button:disabled { opacity:.6; }
@@ -58,6 +60,10 @@
 
     <section>
       <h2>VinylVault <small>· optional</small></h2>
+      <p id="vvok" class="ok" hidden></p>
+      <a class="connect vv" id="vvbtn" href="vinylvault/connect">Connect with VinylVault</a>
+      <p class="hint" id="vvmanage" hidden></p>
+      <p class="or">or paste a shared shelf link</p>
       <label for="shelf">Your shared shelf link</label>
       <input id="shelf" name="shelf" type="url" placeholder="https://…/shelf/…" autocapitalize="none" spellcheck="false">
       <p class="hint">Shows your own pressings on the record. Leave empty to skip.</p>
@@ -96,6 +102,20 @@ fetch('state').then(r => r.json()).then(s => {
   const q = location.search;
   if (q.includes('connected') && s.user) say('Connected as ' + s.user + '. It shows up on the display now.', 'ok');
   if (q.includes('login-failed')) say('Last.fm didn’t confirm the login. Try again, or type your user name.', 'bad');
+  if (s.vv_owner !== null) {
+    const ok = document.getElementById('vvok');
+    ok.textContent = '✓ Connected' + (s.vv_owner ? ' as ' + s.vv_owner : '');
+    ok.hidden = false;
+    document.getElementById('vvbtn').textContent = 'Connect again';
+    const m = document.getElementById('vvmanage');
+    m.append('Disconnect anytime at ');
+    const a = document.createElement('a');
+    a.href = s.vv_site + '/connect'; a.target = '_blank'; a.rel = 'noopener';
+    a.textContent = a.href.replace(/^https?:\/\//, '');
+    m.append(a); m.hidden = false;
+  }
+  if (q.includes('vv-connected')) say('VinylVault connected. Your own pressings show up on the record.', 'ok');
+  if (q.includes('vv-failed')) say('VinylVault didn’t connect. Try again, or paste a shelf link.', 'bad');
   if (q) history.replaceState(null, '', location.pathname);
   connected = !!(s.user && (s.has_key || s.builtin_key));
 });

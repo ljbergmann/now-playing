@@ -62,10 +62,92 @@ pub fn start(on_event: impl Fn(Event) + Send + 'static) -> Result<Option<Started
 /// 16 random characters from a 32-letter alphabet (80 bits), from the OS's
 /// random source. No fallback: without it, no setup page.
 fn token() -> std::io::Result<String> {
-    let mut b = [0u8; 16];
+    random(16, b"abcdefghijkmnpqrstuvwxyz23456789")
+}
+
+/// `n` random characters from `alphabet` (whose length divides 256, so no bias).
+fn random(n: usize, alphabet: &[u8]) -> std::io::Result<String> {
+    let mut b = vec![0u8; n];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
-    const A: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
-    Ok(b.iter().map(|x| A[*x as usize % A.len()] as char).collect())
+    Ok(b.iter().map(|x| alphabet[*x as usize % alphabet.len()] as char).collect())
+}
+
+const URL_SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// PKCE (S256): base64url, no padding, of SHA-256(verifier).
+fn challenge(verifier: &str) -> String {
+    use sha2::Digest;
+    let d = sha2::Sha256::digest(verifier.as_bytes());
+    let mut out = String::new();
+    for chunk in d.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
+        for i in 0..=chunk.len() {
+            out.push(URL_SAFE[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+/// A query parameter, percent-decoded.
+fn param(query: &str, name: &str) -> Option<String> {
+    let raw = query.split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))?;
+    let b = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => {
+                out.push(u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).ok()?, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Shown in VinylVault's list of connected displays.
+fn display_name() -> String {
+    let mut buf = [0u8; 64];
+    let host = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
+    let host = if host { String::from_utf8_lossy(&buf[..buf.iter().position(|&b| b == 0).unwrap_or(0)]).to_string() } else { String::new() };
+    let host = host.split('.').next().unwrap_or("").to_string(); // "Mac.home" → "Mac"
+    let name = if host.is_empty() { "Now Playing".to_string() } else { format!("Now Playing · {host}") };
+    name.chars().take(60).collect()
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Swaps VinylVault's one-time code for the display's read-only pass.
+fn vinylvault_token(code: &str, verifier: &str) -> Result<(String, String), String> {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(10)).user_agent("now-playing-display/0.3").build();
+    let resp = agent
+        .post(&format!("{}/displays/token", vinylvault::site()))
+        .set("Content-Type", "application/json")
+        .send_string(&serde_json::json!({ "code": code, "verifier": verifier }).to_string())
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => format!("VinylVault said no (HTTP {code})"),
+            ureq::Error::Transport(t) => format!("can't reach VinylVault ({})", t.kind()),
+        })?;
+    let mut body = String::new();
+    resp.into_reader().take(64 * 1024).read_to_string(&mut body).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let token = v["token"].as_str().filter(|t| t.starts_with("vvd_")).ok_or("no pass in VinylVault's answer")?;
+    Ok((token.to_string(), v["name"].as_str().unwrap_or("").to_string()))
 }
 
 /// This machine's address on the local network (no packet is sent).
@@ -74,6 +156,24 @@ fn lan_ip() -> Option<String> {
     s.connect("192.0.2.1:9").ok()?;
     let ip = s.local_addr().ok()?.ip();
     (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn pkce_challenge_is_base64url_sha256() {
+        // Expected values from Python: base64.urlsafe_b64encode(sha256(v)).rstrip("=")
+        assert_eq!(super::challenge("dBjftJeZ4CVP-mJ92oSl3nDvuSu3yZsfmD-YC2Q47c0"), "ZPfezKB-pMKjuwE3GECW9VKl2qPsD8T-y6XPZnm7YN0");
+        assert_eq!(super::challenge("dBjftJeZ4CVP-mJ92oSl3nDvuSu3yZsfmD-YC2Q47cM"), "30KIVHMaSrqbuLlgSm5yY5jebdK7E7q4GVq_xIZTzBU");
+    }
+
+    #[test]
+    fn query_params_are_decoded() {
+        assert_eq!(super::param("code=a%2Fb+c&state=x", "code").as_deref(), Some("a/b c"));
+        assert_eq!(super::param("xcode=1&code=2", "code").as_deref(), Some("2"));
+        assert_eq!(super::param("code=%4", "code").as_deref(), Some("%4"));
+        assert_eq!(super::param("state=x", "code"), None);
+    }
 }
 
 #[derive(Deserialize)]
@@ -91,6 +191,8 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
     let base = format!("/{token}");
     let mut last = Instant::now();
     let mut visited = false;
+    // "Connect with VinylVault" in progress: (verifier, state).
+    let mut pending: Option<(String, String)> = None;
     loop {
         let req = match server.recv_timeout(Duration::from_secs(1)) {
             Ok(Some(r)) => r,
@@ -172,6 +274,49 @@ fn serve(server: &Server, token: &str, on_event: &impl Fn(Event)) {
                 };
                 let _ = req.respond(Response::empty(302).with_header(header("Location", &to)));
             }
+            // "Connect with VinylVault": like Last.fm, plus PKCE so a stolen
+            // code is useless without the verifier only this display knows.
+            (Method::Get, "/vinylvault/connect") => {
+                let reply = match (host(&req), random(64, URL_SAFE), random(32, URL_SAFE)) {
+                    (Some(h), Ok(verifier), Ok(state)) => {
+                        let back = format!("http://{h}{base}/vinylvault/back");
+                        let to = format!(
+                            "{}/connect?name={}&cb={}&challenge={}&state={}",
+                            vinylvault::site(),
+                            urlencode(&display_name()),
+                            urlencode(&back),
+                            challenge(&verifier),
+                            state
+                        );
+                        pending = Some((verifier, state));
+                        Response::empty(302).with_header(header("Location", &to))
+                    }
+                    _ => Response::empty(500),
+                };
+                let _ = req.respond(reply);
+            }
+            (Method::Get, "/vinylvault/back") => {
+                let result = match (&pending, param(&query, "state"), param(&query, "code")) {
+                    (_, _, _) if param(&query, "error").is_some() => Err("denied".to_string()),
+                    (Some((verifier, state)), Some(s), Some(code)) if s == *state => vinylvault_token(&code, verifier)
+                        .and_then(|(token, owner)| {
+                            settings::save(&[("VINYLVAULT_TOKEN", Some(&token)), ("VINYLVAULT_OWNER", Some(&owner))])
+                        }),
+                    _ => Err("this link doesn't belong to this setup".to_string()),
+                };
+                pending = None;
+                let to = match result {
+                    Ok(()) => {
+                        on_event(Event::Saved);
+                        format!("{base}/?vv-connected")
+                    }
+                    Err(e) => {
+                        eprintln!("VinylVault connect: {e}");
+                        format!("{base}/?vv-failed")
+                    }
+                };
+                let _ = req.respond(Response::empty(302).with_header(header("Location", &to)));
+            }
             (Method::Post, "/done") => {
                 let _ = req.respond(json(&serde_json::json!({ "ok": true })));
                 return;
@@ -209,6 +354,8 @@ fn state() -> serde_json::Value {
         "builtin_key": lastfm::builtin_key().is_some(),
         "connect": lastfm::builtin_key().is_some() && lastfm::builtin_secret().is_some(),
         "shelf": settings::get("VINYLVAULT_SHELF").unwrap_or_default(),
+        "vv_owner": settings::get("VINYLVAULT_TOKEN").map(|_| settings::get("VINYLVAULT_OWNER").unwrap_or_default()),
+        "vv_site": vinylvault::site(),
         "theme": settings::get("THEME").unwrap_or_else(|| "vinyl".into()),
         "clock": settings::get("CLOCK").unwrap_or_else(|| "24h".into()),
     })
@@ -241,7 +388,7 @@ fn save(body: &str) -> Result<String, String> {
         None => "Connected. Play something and it shows up on the display.".into(),
     };
     if !shelf.is_empty() {
-        vinylvault::load_once(shelf).map_err(|_| "That VinylVault shelf link doesn't work. Copy it again from the app?")?;
+        vinylvault::check_link(shelf).map_err(|_| "That VinylVault shelf link doesn't work. Copy it again from the app?")?;
     }
     settings::save(&[
         ("LASTFM_USER", Some(user)),

@@ -327,6 +327,29 @@ impl Catalogue {
     }
 }
 
+/// The VinylVault site: `VINYLVAULT_URL`, else the one in the shelf link, else the default.
+pub fn site() -> String {
+    match crate::settings::get("VINYLVAULT_URL") {
+        Some(u) => u.trim_end_matches('/').to_string(),
+        None => base_url(crate::settings::get("VINYLVAULT_SHELF").as_deref()),
+    }
+}
+
+/// Where the shelf comes from: a display connected with "Connect with
+/// VinylVault" (read-only pass, works for private shelves), else a public link.
+#[derive(Clone, PartialEq)]
+pub struct Source {
+    url: String,
+    token: Option<String>,
+}
+
+pub fn source() -> Option<Source> {
+    if let Some(token) = crate::settings::get("VINYLVAULT_TOKEN") {
+        return Some(Source { url: format!("{}/me/shelf.json", site()), token: Some(token) });
+    }
+    crate::settings::get("VINYLVAULT_SHELF").map(|s| Source { url: shelf_url(&s), token: None })
+}
+
 /// The site behind a shelf setting (so a self-hosted VinylVault works too).
 pub fn base_url(shelf_setting: Option<&str>) -> String {
     match shelf_setting.map(str::trim) {
@@ -364,8 +387,15 @@ fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).user_agent("now-playing-display/0.2").build()
 }
 
-fn fetch(agent: &ureq::Agent, url: &str) -> Result<Vec<Record>, String> {
-    match agent.get(url).call() {
+/// Marks an answer that means "this display was disconnected in VinylVault".
+const REVOKED: &str = "VinylVault: this display was disconnected";
+
+fn fetch(agent: &ureq::Agent, src: &Source) -> Result<Vec<Record>, String> {
+    let mut req = agent.get(&src.url);
+    if let Some(t) = &src.token {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    match req.call() {
         // Shelves are small JSON; cap the body anyway.
         Ok(resp) => {
             let mut body = String::new();
@@ -373,6 +403,7 @@ fn fetch(agent: &ureq::Agent, url: &str) -> Result<Vec<Record>, String> {
                 .map_err(|e| e.to_string())?;
             parse(&body)
         }
+        Err(ureq::Error::Status(401, _)) if src.token.is_some() => Err(REVOKED.into()),
         Err(ureq::Error::Status(404, _)) => Err("VinylVault: shelf not found (is sharing switched on?)".into()),
         Err(ureq::Error::Status(code, _)) => Err(format!("VinylVault: HTTP {code}")),
         Err(ureq::Error::Transport(t)) => Err(format!("VinylVault: network error: {}", t.kind())),
@@ -380,19 +411,23 @@ fn fetch(agent: &ureq::Agent, url: &str) -> Result<Vec<Record>, String> {
 }
 
 /// One-off load (for `--snapshot`).
-pub fn load_once(setting: &str) -> Result<Shelf, String> {
-    Ok(Arc::new(RwLock::new(fetch(&agent(), &shelf_url(setting))?)))
+pub fn load_once(src: &Source) -> Result<Shelf, String> {
+    Ok(Arc::new(RwLock::new(fetch(&agent(), src)?)))
+}
+
+/// Checks a pasted shelf link (setup page).
+pub fn check_link(setting: &str) -> Result<(), String> {
+    fetch(&agent(), &Source { url: shelf_url(setting), token: None }).map(|_| ())
 }
 
 /// Starts the refresh thread. `changed` is called after each successful load.
-pub fn spawn(setting: &str, changed: impl Fn() -> bool + Send + 'static) -> Shelf {
+pub fn spawn(src: Source, changed: impl Fn() -> bool + Send + 'static) -> Shelf {
     let shelf: Shelf = Arc::new(RwLock::new(Vec::new()));
-    let url = shelf_url(setting);
     let out = shelf.clone();
     thread::spawn(move || {
         let agent = agent();
         loop {
-            let result = fetch(&agent, &url);
+            let result = fetch(&agent, &src);
             match result {
                 Ok(records) => {
                     let n = records.len();
@@ -405,6 +440,16 @@ pub fn spawn(setting: &str, changed: impl Fn() -> bool + Send + 'static) -> Shel
                         return;
                     }
                     thread::sleep(REFRESH);
+                }
+                Err(e) if e == REVOKED => {
+                    // Forget the pass; the setup page then offers to reconnect.
+                    eprintln!("{e}");
+                    let _ = crate::settings::save(&[("VINYLVAULT_TOKEN", None), ("VINYLVAULT_OWNER", None)]);
+                    if let Ok(mut w) = out.write() {
+                        w.clear();
+                    }
+                    changed();
+                    return;
                 }
                 Err(e) => {
                     eprintln!("{e}");
