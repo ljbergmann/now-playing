@@ -1,28 +1,28 @@
 //! now-playing: a full-screen "now playing" display for the Raspberry Pi,
-//! fed by Last.fm.
+//! fed by Last.fm, in one of three looks (vinyl, poster, ambient).
 //!
 //! Threads:
 //!   poller  — asks Last.fm every few seconds, downloads cover art
 //!   compose — renders a complete static frame whenever something changes
-//!   main    — 60 fps loop: crossfades between frames, animates the
-//!             equalizer, hands only changed pixels to the display, and
-//!             follows screen changes (plug/unplug, resolution, window resize)
+//!   main    — 60 fps loop (`frame::Compositor`): crossfades, spinning label,
+//!             colour drift, equalizer; hands only changed pixels to the
+//!             display and follows screen changes (plug/unplug, resize)
 
 mod display;
+mod draw;
 mod fonts;
 mod frame;
 mod lastfm;
 mod scene;
+mod themes;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use display::{Dirty, Status};
-use scene::{Scene, View};
-
-const FADE: Duration = Duration::from_millis(450);
+use display::Status;
+use scene::{Scene, Theme, View};
 
 static QUIT: AtomicBool = AtomicBool::new(false);
 pub fn quit_requested() -> bool {
@@ -36,31 +36,38 @@ extern "C" fn on_signal(_: libc::c_int) {
 enum Msg {
     Lastfm(lastfm::Update),
     Resize(usize, usize),
+    Theme(Theme),
+    ToggleIdlePreview,
 }
 
 struct Args {
     snapshot: Option<String>,
     size: Option<(usize, usize)>,
     bench: bool,
+    idle: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { snapshot: None, size: None, bench: false };
+    let mut a = Args { snapshot: None, size: None, bench: false, idle: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--snapshot" => a.snapshot = Some(it.next().ok_or("--snapshot needs a file name")?),
             "--size" => a.size = Some(parse_size(&it.next().ok_or("--size needs WIDTHxHEIGHT")?)?),
             "--bench" => a.bench = true,
+            "--idle" => a.idle = true,
             "-h" | "--help" => {
                 println!(
-                    "now-playing [--size WxH] [--snapshot out.png] [--bench]\n\n\
+                    "now-playing [--size WxH] [--snapshot out.png [--idle]] [--bench]\n\n\
                      env: LASTFM_USER, LASTFM_API_KEY   (required)\n     \
+                     THEME            vinyl (default), poster or ambient\n     \
+                     CLOCK            24h (default) or 12h\n     \
                      POLL_SECS        seconds between Last.fm checks (default 6)\n     \
                      ROTATE           0, 90, 180 or 270 (default: what the panel reports, else 0)\n     \
                      CONNECTOR        screen to use, e.g. HDMI-A-1 or DSI-1 (default: first connected)\n     \
-                     FONT_REGULAR, FONT_BOLD   font file overrides\n\n\
-                     On Linux it draws straight to the screen (DRM/KMS); on macOS it opens a window."
+                     FONT_LIGHT, FONT_REGULAR, FONT_BOLD, FONT_BLACK   font file overrides\n\n\
+                     On Linux it draws straight to the screen (DRM/KMS); on macOS it opens a\n\
+                     window (keys: 1 vinyl, 2 poster, 3 ambient, I preview idle, Esc quit)."
                 );
                 std::process::exit(0);
             }
@@ -103,6 +110,24 @@ fn display_options(size: Option<(usize, usize)>) -> Result<display::Options, Str
     Ok(display::Options { size, rotate, connector: env("CONNECTOR") })
 }
 
+struct Look {
+    theme: Theme,
+    twelve_hour: bool,
+}
+
+fn look() -> Result<Look, String> {
+    let theme = match env("THEME") {
+        None => Theme::Vinyl,
+        Some(t) => Theme::parse(&t).ok_or(format!("THEME must be vinyl, poster or ambient (got {t})"))?,
+    };
+    let twelve_hour = match env("CLOCK").as_deref() {
+        None | Some("24h") | Some("24") => false,
+        Some("12h") | Some("12") => true,
+        Some(v) => return Err(format!("CLOCK must be 24h or 12h (got {v})")),
+    };
+    Ok(Look { theme, twelve_hour })
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("now-playing: {e}");
@@ -116,6 +141,7 @@ fn run() -> Result<(), String> {
         libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
     }
+    let look = look()?;
     let fonts = fonts::Fonts::discover()?;
 
     if args.bench {
@@ -129,82 +155,50 @@ fn run() -> Result<(), String> {
     lastfm::spawn(lastfm_config()?, move |u| tx.send(Msg::Lastfm(u)).is_ok());
 
     if let Some(path) = args.snapshot {
-        return snapshot(&fonts, msg_rx, args.size.unwrap_or((800, 480)), &path);
+        return snapshot(&fonts, &look, msg_rx, args.size.unwrap_or((800, 480)), args.idle, &path);
     }
 
     let Some(mut display) = wait_for_display(&opts) else { return Ok(()) };
     let (mut w, mut h) = display.size();
 
-    // Compose thread: turns Last.fm updates into finished frames.
     let (scene_tx, scene_rx) = mpsc::channel::<(Scene, bool)>();
-    thread::spawn(move || compose_loop(fonts, (w, h), msg_rx, scene_tx));
+    thread::spawn(move || compose_loop(fonts, look, (w, h), msg_rx, scene_tx));
 
-    let mut base = vec![0u32; w * h]; // current static frame
-    let mut from = vec![0u32; w * h]; // previous frame during a crossfade
-    let mut out = vec![0u32; w * h]; // what goes to the screen
-    let mut eq = None;
-    let mut fade_start: Option<Instant> = None;
-    let mut dirty = Dirty::Full;
-    let start = Instant::now();
-
+    let mut comp = frame::Compositor::new(w, h);
     loop {
-        // Take the newest finished frame, if any (ignoring ones for an old size).
-        if let Some((scene, fade)) = scene_rx.try_iter().filter(|(s, _)| s.pixels.len() == w * h).last() {
-            if fade {
-                from.copy_from_slice(&out);
-                fade_start = Some(Instant::now());
-            } else {
-                dirty = Dirty::Full;
-                out.copy_from_slice(&scene.pixels);
-            }
-            base = scene.pixels;
-            eq = scene.eq;
+        // Newest finished frame, if any (ignoring ones rendered for an old size).
+        if let Some((scene, fade)) = scene_rx.try_iter().filter(|(s, _)| comp.accepts(s)).last() {
+            comp.set_scene(scene, fade);
         }
-
-        if let Some(t0) = fade_start {
-            let x = t0.elapsed().as_secs_f32() / FADE.as_secs_f32();
-            frame::blend(&from, &base, &mut out, (frame::ease(x) * 256.0) as u32);
-            if x >= 1.0 {
-                fade_start = None;
-                out.copy_from_slice(&base);
-            }
-            dirty = Dirty::Full;
-        }
-
-        if let Some(spec) = &eq {
-            frame::draw_eq(&mut out, &base, w, spec, start.elapsed().as_secs_f32());
-            if matches!(dirty, Dirty::None) {
-                dirty = Dirty::Rects(vec![frame::eq_rect(spec)]);
-            }
-        }
-
-        let status = display.present(&out, std::mem::replace(&mut dirty, Dirty::None))?;
-        match status {
-            Status::Continue => continue,
+        let dirty = comp.frame();
+        match display.present(&comp.out, dirty)? {
+            Status::Continue => {}
             Status::Quit => break,
             Status::Lost => {
                 drop(display);
                 let Some(d) = wait_for_display(&opts) else { break };
                 display = d;
+                comp.invalidate();
             }
             Status::Resized => {}
         }
-        // New screen or new size: start over with a blank frame at the new size.
+        if let Some(k) = display.key() {
+            let msg = match k {
+                '1' => Msg::Theme(Theme::Vinyl),
+                '2' => Msg::Theme(Theme::Poster),
+                '3' => Msg::Theme(Theme::Ambient),
+                _ => Msg::ToggleIdlePreview,
+            };
+            let _ = msg_tx.send(msg);
+        }
         let (nw, nh) = display.size();
         if (nw, nh) != (w, h) {
             (w, h) = (nw, nh);
-            base = vec![0u32; w * h];
-            from = vec![0u32; w * h];
-            out = vec![0u32; w * h];
-            eq = None;
-            fade_start = None;
+            comp = frame::Compositor::new(w, h);
             if msg_tx.send(Msg::Resize(w, h)).is_err() {
                 break;
             }
-        } else {
-            out.copy_from_slice(&base);
         }
-        dirty = Dirty::Full;
     }
     Ok(())
 }
@@ -232,35 +226,42 @@ fn wait_for_display(opts: &display::Options) -> Option<Box<dyn display::Display>
     }
 }
 
-fn compose_loop(fonts: fonts::Fonts, size: (usize, usize), rx: mpsc::Receiver<Msg>, tx: mpsc::Sender<(Scene, bool)>) {
+/// Time until just after the next full minute (so the clock flips on time).
+fn until_next_minute() -> Duration {
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    Duration::from_millis(60_000 - ms % 60_000 + 50)
+}
+
+fn compose_loop(fonts: fonts::Fonts, mut look: Look, size: (usize, usize), rx: mpsc::Receiver<Msg>, tx: mpsc::Sender<(Scene, bool)>) {
     let (mut w, mut h) = size;
     let mut track: Option<Option<lastfm::Track>> = None; // None = no answer from Last.fm yet
     let mut error: Option<String> = None;
-    let mut shown_key: Option<Option<(String, String, String)>> = None;
+    let mut preview_idle = false;
+    let mut shown: Option<String> = None;
 
     loop {
+        let idle = preview_idle || !track.as_ref().is_some_and(|t| t.as_ref().is_some_and(|t| t.playing));
         let view = match &track {
             None => View::Connecting(error.as_deref()),
-            Some(t) => View::Track(t.as_ref()),
+            Some(t) => View::Track { track: t.as_ref(), idle },
         };
-        // Crossfade when the song (or kind of screen) changes, swap instantly
-        // for small updates such as "14 min ago" → "15 min ago".
-        let key = track.as_ref().map(|t| {
-            t.as_ref().map(|t| {
-                let (a, b, c) = t.key();
-                (a.to_string(), b.to_string(), c.to_string())
-            })
-        });
-        let fade = shown_key.is_some() && shown_key != Some(key.clone().flatten());
-        shown_key = Some(key.flatten());
+        // Crossfade when what's shown changes in kind (song, playing/idle, theme);
+        // swap instantly for small updates such as the clock ticking.
+        let key = format!(
+            "{:?}|{idle}|{:?}",
+            look.theme,
+            track.as_ref().map(|t| t.as_ref().map(|t| (t.title.clone(), t.artist.clone(), t.album.clone())))
+        );
+        let fade = shown.as_ref().is_some_and(|s| *s != key);
+        shown = Some(key);
 
-        let scene = scene::render(&fonts, w, h, &view, SystemTime::now());
+        let scene = scene::render(&fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour);
         if tx.send((scene, fade)).is_err() {
             return;
         }
 
-        // Re-render every 30 s so "last played … ago" stays current.
-        match rx.recv_timeout(Duration::from_secs(30)) {
+        // Wake on the next minute (clock), or on news.
+        match rx.recv_timeout(until_next_minute()) {
             Ok(Msg::Lastfm(lastfm::Update::Track(t))) => {
                 track = Some(t);
                 error = None;
@@ -274,33 +275,61 @@ fn compose_loop(fonts: fonts::Fonts, size: (usize, usize), rx: mpsc::Receiver<Ms
             }
             Ok(Msg::Resize(nw, nh)) => {
                 (w, h) = (nw, nh);
-                shown_key = None; // no crossfade from a frame of another size
+                shown = None; // no crossfade from a frame of another size
             }
+            Ok(Msg::Theme(t)) => look.theme = t,
+            Ok(Msg::ToggleIdlePreview) => preview_idle = !preview_idle,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
     }
 }
 
-fn snapshot(fonts: &fonts::Fonts, rx: mpsc::Receiver<Msg>, (w, h): (usize, usize), path: &str) -> Result<(), String> {
+fn snapshot(
+    fonts: &fonts::Fonts,
+    look: &Look,
+    rx: mpsc::Receiver<Msg>,
+    (w, h): (usize, usize),
+    idle: bool,
+    path: &str,
+) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let track = loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Msg::Lastfm(lastfm::Update::Track(t))) => break t,
             Ok(Msg::Lastfm(lastfm::Update::Error(e))) => return Err(e),
-            Ok(Msg::Resize(..)) => {}
+            Ok(_) => {}
             Err(_) => return Err("no answer from Last.fm within 20 s".into()),
         }
     };
-    let mut scene = scene::render(fonts, w, h, &View::Track(track.as_ref()), SystemTime::now());
-    if let Some(spec) = scene.eq {
-        let base = scene.pixels.clone();
-        frame::draw_eq(&mut scene.pixels, &base, w, &spec, 0.35);
-    }
-    let rgb: Vec<u8> = scene.pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+    let idle = idle || !track.as_ref().is_some_and(|t| t.playing);
+    let view = View::Track { track: track.as_ref(), idle };
+    let scene = scene::render(fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour);
+    let pixels = still(&scene, w);
+    let rgb: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
     image::save_buffer(path, &rgb, w as u32, h as u32, image::ColorType::Rgb8).map_err(|e| e.to_string())?;
     println!("wrote {path} ({w}x{h})");
     Ok(())
+}
+
+/// A representative still of an animated scene (mid-drift, label turned a bit).
+fn still(scene: &Scene, w: usize) -> Vec<u32> {
+    let mut px = match &scene.alt {
+        Some(alt) => {
+            let mut o = vec![0; scene.pixels.len()];
+            frame::blend(&scene.pixels, alt, &mut o, 128);
+            o
+        }
+        None => scene.pixels.clone(),
+    };
+    let under = px.clone();
+    if let Some(eq) = &scene.eq {
+        frame::draw_eq(&mut px, &under, w, eq, 0.35);
+    }
+    if let Some(sp) = &scene.spinner {
+        frame::draw_spinner(&mut px, &under, w, sp, 0.5, 256);
+    }
+    px
 }
 
 /// Times the work that matters for smoothness. The 60 fps budget is 16.7 ms.
@@ -315,34 +344,43 @@ fn bench(fonts: &fonts::Fonts) {
         playing: true,
         played_at: None,
     };
-    println!("{:<11} {:>16} {:>18} {:>16}", "size", "render (bg thr)", "crossfade/frame", "eq/frame");
-    for (w, h) in [(480, 320), (800, 480), (1024, 600), (1280, 720), (720, 1280), (720, 720)] {
-        let t = Instant::now();
-        let n = 3;
-        let mut scene = None;
-        for _ in 0..n {
-            scene = Some(scene::render(fonts, w, h, &View::Track(Some(&track)), SystemTime::now()));
-        }
-        let render_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
-        let scene = scene.unwrap();
+    println!("Per-frame budget at 60 fps: 16.7 ms. 'worst frame' = the most work any single frame does.");
+    println!("{:<8} {:<10} {:>14} {:>13} {:>13}", "theme", "size", "render (bg)", "steady frame", "worst frame");
+    for theme in [Theme::Vinyl, Theme::Poster, Theme::Ambient] {
+        for (w, h) in [(480, 320), (800, 480), (1280, 720), (720, 1280)] {
+            let t = Instant::now();
+            let view = View::Track { track: Some(&track), idle: false };
+            let scene = scene::render(fonts, w, h, &view, SystemTime::now(), theme, false);
+            let render_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-        let from = vec![0x0011_2233u32; w * h];
-        let mut out = vec![0u32; w * h];
-        let n = 200;
-        let t = Instant::now();
-        for i in 0..n {
-            frame::blend(&from, &scene.pixels, &mut out, (i % 257) as u32);
-        }
-        let blend_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
-
-        let n = 5000;
-        let t = Instant::now();
-        if let Some(spec) = &scene.eq {
-            for i in 0..n {
-                frame::draw_eq(&mut out, &scene.pixels, w, spec, i as f32 / 60.0);
+            // Steady state: whatever the theme animates every frame.
+            let mut comp = frame::Compositor::new(w, h);
+            comp.set_scene(scene, false);
+            comp.frame();
+            let n = 300;
+            let t = Instant::now();
+            for _ in 0..n {
+                let _ = comp.frame();
             }
+            let steady_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+
+            // Worst case: a crossfade frame (full blend + overlays).
+            let scene2 = scene::render(fonts, w, h, &view, SystemTime::now(), theme, false);
+            comp.set_scene(scene2, true);
+            let n = 30;
+            let t = Instant::now();
+            for _ in 0..n {
+                let _ = comp.frame();
+            }
+            let worst_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            println!(
+                "{:<8} {:<10} {:>11.0} ms {:>10.2} ms {:>10.2} ms",
+                format!("{theme:?}").to_lowercase(),
+                format!("{w}x{h}"),
+                render_ms,
+                steady_ms,
+                worst_ms
+            );
         }
-        let eq_us = t.elapsed().as_secs_f64() * 1e6 / n as f64;
-        println!("{:<11} {:>13.1} ms {:>15.2} ms {:>13.1} µs", format!("{w}x{h}"), render_ms, blend_ms, eq_us);
     }
 }

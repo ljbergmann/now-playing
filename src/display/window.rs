@@ -1,7 +1,7 @@
 //! macOS development window (minifb). Not used on the Pi.
 //! Resizable, so layouts for other screen shapes can be tried live.
 
-use minifb::{Key, ScaleMode, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, ScaleMode, Window, WindowOptions};
 
 use super::{Dirty, Display, Status};
 
@@ -40,5 +40,15 @@ impl Display for Win {
             return Ok(Status::Resized);
         }
         Ok(Status::Continue)
+    }
+
+    fn key(&mut self) -> Option<char> {
+        self.win.get_keys_pressed(KeyRepeat::No).into_iter().find_map(|k| match k {
+            Key::Key1 => Some('1'),
+            Key::Key2 => Some('2'),
+            Key::Key3 => Some('3'),
+            Key::I => Some('i'),
+            _ => None,
+        })
     }
 }

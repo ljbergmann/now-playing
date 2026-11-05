@@ -29,6 +29,10 @@ pub trait Display {
     fn size(&self) -> (usize, usize);
     /// Shows `frame` and waits for the next vblank (≈ 16.7 ms at 60 Hz).
     fn present(&mut self, frame: &[u32], dirty: Dirty) -> Result<Status, String>;
+    /// A key pressed since the last call (development window only).
+    fn key(&mut self) -> Option<char> {
+        None
+    }
 }
 
 /// Settings from the environment (see README).

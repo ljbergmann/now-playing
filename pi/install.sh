@@ -39,6 +39,8 @@ sudo install -m 600 /dev/null /etc/now-playing/env
 sudo tee /etc/now-playing/env >/dev/null <<EOF
 LASTFM_USER=$LASTFM_USER
 LASTFM_API_KEY=$LASTFM_API_KEY
+${THEME:+THEME=$THEME}
+${CLOCK:+CLOCK=$CLOCK}
 ${ROTATE:+ROTATE=$ROTATE}
 ${CONNECTOR:+CONNECTOR=$CONNECTOR}
 EOF

@@ -11,6 +11,19 @@ Works with anything that scrobbles to Last.fm (e.g. Tidal on any device).
 - Adapts to the attached screen: any resolution, landscape/portrait/square,
   hot-plugging, automatic or configurable rotation
 
+## Looks
+
+Pick one with `THEME` (switch live on the Mac with keys `1` `2` `3`):
+
+| `THEME` | Playing | Nothing playing |
+|---|---|---|
+| `vinyl` (default) | A record with the cover as its label, spinning at 33⅓ rpm, tonearm in the groove | Arm lifts, record spins down, big clock with the last track |
+| `poster` | Cover fills the screen, heavy type over a dark fade, accent colour from the art | Cover goes dark and grey, huge clock |
+| `ambient` | Cover floating on a slowly drifting colour field made from its own colours | Thin clock in the middle, last cover as a small thumbnail |
+
+Tracks without cover art get generated art (colours derived from the track name).
+`CLOCK=12h` switches the clock to 12-hour time.
+
 ## How it works
 
 ```
@@ -26,8 +39,10 @@ NEON-vectorised on the Pi) and redraws the tiny equalizer region.
 | Source file | What it does |
 |---|---|
 | `src/lastfm.rs` | Polls `user.getRecentTracks`, downloads cover art (770px) |
-| `src/scene.rs` | Renders a complete frame: background, cover, text |
-| `src/frame.rs` | Per-frame work: crossfade, equalizer bars |
+| `src/scene.rs` | Renders a complete frame in the chosen look; text layout |
+| `src/themes/` | The three looks: `vinyl.rs`, `poster.rs`, `ambient.rs` |
+| `src/draw.rs` | Shared drawing: text, shapes, cover scaling, palette, clock |
+| `src/frame.rs` | Per-frame work: crossfade, colour drift, spinning label, equalizer |
 | `src/display/kms.rs` | Pi output: double-buffered DRM/KMS with vsync page flips |
 | `src/display/window.rs` | Mac output: a window, for development |
 | `src/fonts.rs` | Finds Inter (or another sans) via fontconfig |
@@ -77,11 +92,13 @@ Any screen works (HDMI or DSI, any size, touch not needed). It adapts by itself:
 - **Two screens connected:** uses the first connected one; pick with `CONNECTOR`.
   The log shows the names (`journalctl -u now-playing`).
 
-Set these at install time, e.g. `ROTATE=90 CONNECTOR=DSI-1 bash now-playing/pi/install.sh …`,
+Set these at install time, e.g. `THEME=poster ROTATE=90 bash now-playing/pi/install.sh …`,
 or edit `/etc/now-playing/env` and `sudo systemctl restart now-playing`:
 
 | Setting | Values |
 |---|---|
+| `THEME` | `vinyl` (default), `poster`, `ambient` |
+| `CLOCK` | `24h` (default) or `12h` |
 | `ROTATE` | `0`, `90`, `180`, `270` (clockwise), or `auto` (default) |
 | `CONNECTOR` | e.g. `HDMI-A-1`, `DSI-1` (default: first connected screen) |
 
@@ -94,10 +111,10 @@ few seconds. If the song only appears later, the display will lag behind.
 ```bash
 cargo run --release --example mock_lastfm      # fake Last.fm on :9911
 LASTFM_USER=x LASTFM_API_KEY=x LASTFM_API_URL=http://localhost:9911/2.0/ \
-  cargo run --release -- --size 800x480         # window; Esc to quit
+  cargo run --release -- --size 800x480         # window; 1/2/3 = look, I = idle, Esc = quit
 curl -X POST localhost:9911/mode/stopped       # also: playing, noart, long
 ```
 
-Other flags: `--snapshot out.png` renders one frame to a file, `--bench` times
+Other flags: `--snapshot out.png [--idle]` renders one frame to a file, `--bench` times
 the per-frame work. Environment: `LASTFM_USER`, `LASTFM_API_KEY` (required),
 `POLL_SECS` (default 6), `FONT_REGULAR` / `FONT_BOLD` (font file overrides).

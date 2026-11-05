@@ -24,12 +24,6 @@ pub struct Track {
     pub played_at: Option<SystemTime>,
 }
 
-impl Track {
-    /// Identity for "is this a different song" (drives the crossfade).
-    pub fn key(&self) -> (&str, &str, &str) {
-        (&self.title, &self.artist, &self.album)
-    }
-}
 
 pub enum Update {
     Track(Option<Track>),

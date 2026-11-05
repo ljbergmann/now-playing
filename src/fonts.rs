@@ -7,8 +7,11 @@ use std::process::Command;
 use ab_glyph::{FontVec, VariableFont};
 
 pub struct Fonts {
+    pub light: FontVec,
     pub regular: FontVec,
     pub bold: FontVec,
+    /// Extra-bold/black, for poster headlines.
+    pub black: FontVec,
 }
 
 fn fc_match(pattern: &str) -> Option<(String, u32)> {
@@ -35,8 +38,10 @@ fn load(env: &str, pattern: &str, weight: f32) -> Result<FontVec, String> {
 impl Fonts {
     pub fn discover() -> Result<Self, String> {
         Ok(Fonts {
+            light: load("FONT_LIGHT", "Inter:weight=light", 300.0)?,
             regular: load("FONT_REGULAR", "Inter:weight=regular", 400.0)?,
             bold: load("FONT_BOLD", "Inter:weight=bold", 700.0)?,
+            black: load("FONT_BLACK", "Inter:weight=black", 900.0)?,
         })
     }
 }
