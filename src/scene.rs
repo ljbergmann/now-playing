@@ -85,6 +85,8 @@ impl Theme {
 
 pub enum View<'a> {
     Connecting(Option<&'a str>),
+    /// QR code for the setup page; `connected` once a phone opened it.
+    Setup { url: &'a str, connected: bool },
     /// `track` = most recent track (if any); `idle` = show the clock screen;
     /// `pressing` = the copy you own of this album (VinylVault), if any.
     Track { track: Option<&'a Track>, idle: bool, pressing: Option<&'a Pressing> },
@@ -118,6 +120,10 @@ pub fn render(fonts: &Fonts, w: usize, h: usize, view: &View, now: SystemTime, t
     let extras = match view {
         View::Connecting(err) => {
             connecting(&mut pm, fonts, err.unwrap_or("Waiting for the network"));
+            Extras::default()
+        }
+        View::Setup { url, connected } => {
+            setup(&mut pm, fonts, url, *connected);
             Extras::default()
         }
         View::Track { track, idle, pressing } => {
@@ -201,6 +207,60 @@ fn brand(pm: &mut Pixmap, fonts: &Fonts) {
     }
     draw::draw_text(pm, &fonts.bold, px, text_x, top, name, [1.0, 1.0, 1.0, 0.62], 0.02 * px);
     draw::draw_text(pm, &fonts.regular, small, text_x, top + draw::line_h(px) - 0.15 * px, tag, [1.0, 1.0, 1.0, 0.4], 0.0);
+}
+
+/// QR code on a white tile, with a few words next to it (below it on portrait screens).
+fn setup(pm: &mut Pixmap, fonts: &Fonts, url: &str, connected: bool) {
+    const ACCENT: draw::Rgba = [1.0, 0.48, 0.27, 1.0];
+    let (w, h) = (pm.width() as f32, pm.height() as f32);
+    let vmin = w.min(h) / 100.0;
+    let pad = draw::clamp(16.0, 7.0 * vmin, 80.0);
+    let portrait = h > w * 1.1;
+    let (status, hint) = if connected {
+        ("On your phone now", "Finish setting up there.")
+    } else {
+        ("Scan to set up", "Point your phone's camera at the code.")
+    };
+    let items = vec![
+        Item::new(&fonts.bold, draw::clamp(10.0, 2.4 * vmin, 18.0), "NOW PLAYING · SETUP", ACCENT).track(0.12),
+        Item::new(&fonts.bold, draw::clamp(20.0, 7.0 * vmin, 64.0), status, WHITE).gap(1.5 * vmin),
+        Item::new(&fonts.regular, draw::clamp(13.0, 3.6 * vmin, 30.0), hint, DIM).gap(0.6 * vmin),
+        Item::new(&fonts.regular, draw::clamp(11.0, 2.8 * vmin, 22.0), "Last.fm  ·  VinylVault (optional)  ·  Look", draw::FAINT).gap(4.0 * vmin),
+        Item::new(&fonts.regular, draw::clamp(10.0, 2.4 * vmin, 18.0), url, draw::FAINT).gap(5.0 * vmin),
+    ];
+    let q = if portrait { (w * 0.62).min(h * 0.45) } else { (h * 0.66).min(w * 0.42) };
+    let text_h = stack_height(&items);
+    let (qx, qy) = if portrait { ((w - q) / 2.0, ((h - q - pad - text_h) / 2.0).max(pad)) } else { (pad * 1.4, (h - q) / 2.0) };
+
+    if let Some(p) = draw::rounded(qx, qy, q, q, q * 0.05) {
+        draw::fill(pm, &p, tiny_skia::Color::WHITE);
+    }
+    if let Ok(code) = qrcode::QrCode::new(url.as_bytes()) {
+        let n = code.width();
+        let quiet = 2.0;
+        let m = q / (n as f32 + 2.0 * quiet);
+        let dark = tiny_skia::Color::from_rgba8(14, 13, 16, 255);
+        for (i, c) in code.to_colors().iter().enumerate() {
+            if *c == qrcode::Color::Dark {
+                let (x, y) = ((i % n) as f32, (i / n) as f32);
+                // Snap to whole pixels so neighbouring modules leave no seams.
+                let x0 = (qx + (x + quiet) * m).round();
+                let y0 = (qy + (y + quiet) * m).round();
+                let x1 = (qx + (x + 1.0 + quiet) * m).round();
+                let y1 = (qy + (y + 1.0 + quiet) * m).round();
+                draw::fill_rect(pm, x0, y0, x1 - x0, y1 - y0, dark);
+            }
+        }
+    }
+
+    let (col, top, align) = if portrait {
+        ((pad, w - 2.0 * pad), qy + q + pad, Align::Center)
+    } else {
+        let x = qx + q + pad * 1.2;
+        ((x, w - x - pad), 0.0, Align::Left)
+    };
+    let top = if portrait { top } else { (h - text_h) / 2.0 };
+    draw_stack(pm, &items, col, top, align);
 }
 
 fn connecting(pm: &mut Pixmap, fonts: &Fonts, sub: &str) {

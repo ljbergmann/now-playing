@@ -72,6 +72,11 @@ NEON-vectorised on the Pi) and redraws the tiny equalizer region.
 
 ## Builds
 
+Release builds carry the app's own Last.fm API key, so people only enter their
+user name. It's read from `~/.config/now-playing/build.env`
+(`LASTFM_APP_KEY=…`, register at https://www.last.fm/api/account/create) and
+never stored in the repo. Without it, the setup page also asks for a key.
+
 | Board | OS | Binary |
 |---|---|---|
 | Raspberry Pi 2 | Raspberry Pi OS Lite **32-bit** (Bookworm or newer) | `dist/now-playing-pi2` (ARMv7, Cortex-A7 tuned) |
@@ -87,19 +92,23 @@ Build both on a Mac or Linux machine with Docker:
 
 1. Flash Raspberry Pi OS Lite with Raspberry Pi Imager (set hostname, user,
    Wi-Fi and SSH there). The Pi 2 has no Wi-Fi: use Ethernet or a USB Wi-Fi stick.
-2. Get a free Last.fm API key: https://www.last.fm/api/account/create
-3. Copy and install:
+2. Copy and install:
 
 ```bash
 scp -r dist pi <user>@<pi-name>.local:now-playing/
-ssh <user>@<pi-name>.local 'bash now-playing/pi/install.sh <lastfm-username> <lastfm-api-key> && sudo reboot'
+ssh <user>@<pi-name>.local 'bash now-playing/pi/install.sh && sudo reboot'
 ```
+
+3. The screen shows a QR code. Scan it with your phone: a small page served by
+   the display (only reachable with the code in the QR) asks for your Last.fm
+   user name, optionally your VinylVault shelf link, and the look; the display
+   changes as you tap. To open it again: `sudo systemctl kill -s USR1 now-playing`.
 
 On the Pi: `systemctl status now-playing`, live log `journalctl -u now-playing -f`.
 
 Or download `now-playing-<version>.tar.gz` from the
 [releases](https://github.com/ljbergmann/now-playing/releases), copy it to the Pi,
-and run `tar xzf now-playing-*.tar.gz && bash now-playing/pi/install.sh <user> <key>`.
+and run `tar xzf now-playing-*.tar.gz && bash now-playing/pi/install.sh`.
 
 ## Screens
 
@@ -138,9 +147,9 @@ few seconds. If the song only appears later, the display will lag behind.
 ./mac/bundle.sh      # → dist/Now Playing.app (with icon; drag it to Applications)
 ```
 
-On first start it creates `~/Library/Application Support/Now Playing/settings`
-and opens it: fill in `LASTFM_USER` and `LASTFM_API_KEY` (plus any setting
-from the table above), save, and start it again. Keys 1/2/3 switch the look.
+On first start the setup page opens in your browser (press S later to open it
+again). Settings are saved to `~/Library/Application Support/Now Playing/settings`.
+Keys 1/2/3 switch the look.
 The app is ad-hoc signed, not notarized: the first time, right-click it →
 Open. Without Inter installed it uses the system font (San Francisco). The
 icon is drawn in code (`cargo run --release --example icon -- icon.png`).
@@ -158,5 +167,5 @@ curl -X POST localhost:9911/finish/splatter    # marbled, swirl, galaxy, picture
 
 `NP_PROFILE=1` prints how long each rendering stage takes. Other flags:
 `--snapshot out.png [--idle]` renders one frame to a file, `--bench` times
-the per-frame work. Environment: `LASTFM_USER`, `LASTFM_API_KEY` (required),
+the per-frame work. Environment (else the setup page's settings file): `LASTFM_USER`, `LASTFM_API_KEY`,
 `POLL_SECS` (default 2; it polls every second around the expected end of a track), `FONT_REGULAR` / `FONT_BOLD` (font file overrides).

@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 # Builds "dist/Now Playing.app" for macOS, with its icon.
-# Settings live in ~/Library/Application Support/Now Playing/settings
-# (created and opened on first start).
+# Settings live in ~/Library/Application Support/Now Playing/settings,
+# written by the setup page that opens on first start.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# The app's Last.fm key (so users only need their user name). Kept outside
+# the repo; builds without it ask users for their own key.
+BUILD_ENV="${NP_BUILD_ENV:-$HOME/.config/now-playing/build.env}"
+LASTFM_APP_KEY=""
+if [[ -f "$BUILD_ENV" ]]; then
+  LASTFM_APP_KEY=$(sed -n 's/^LASTFM_APP_KEY=//p' "$BUILD_ENV" | head -1)
+fi
+export LASTFM_APP_KEY
+echo "Last.fm app key: $([[ -n $LASTFM_APP_KEY ]] && echo built in || echo none, users enter their own)"
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 APP="dist/Now Playing.app"

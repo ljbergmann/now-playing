@@ -6,7 +6,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# The app's Last.fm key (so users only need their user name). Kept outside
+# the repo; builds without it ask users for their own key.
+BUILD_ENV="${NP_BUILD_ENV:-$HOME/.config/now-playing/build.env}"
+LASTFM_APP_KEY=""
+if [[ -f "$BUILD_ENV" ]]; then
+  LASTFM_APP_KEY=$(sed -n 's/^LASTFM_APP_KEY=//p' "$BUILD_ENV" | head -1)
+fi
+export LASTFM_APP_KEY
+echo "Last.fm app key: $([[ -n $LASTFM_APP_KEY ]] && echo built in || echo none, users enter their own)"
+
 docker run --rm \
+  -e LASTFM_APP_KEY \
   -v "$PWD":/src -w /src \
   -v now-playing-cargo:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/src/target/pi \

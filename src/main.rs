@@ -14,9 +14,12 @@ mod fonts;
 mod frame;
 mod lastfm;
 mod scene;
+mod settings;
+mod setup;
 mod themes;
 mod vinylvault;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -32,6 +35,11 @@ pub fn quit_requested() -> bool {
 extern "C" fn on_signal(_: libc::c_int) {
     QUIT.store(true, Ordering::Relaxed);
 }
+/// SIGUSR1 (`systemctl kill -s USR1 now-playing`) opens the setup page again.
+static SETUP: AtomicBool = AtomicBool::new(false);
+extern "C" fn on_setup_signal(_: libc::c_int) {
+    SETUP.store(true, Ordering::Relaxed);
+}
 
 /// Messages for the compose thread.
 enum Msg {
@@ -40,6 +48,12 @@ enum Msg {
     Theme(Theme),
     ToggleIdlePreview,
     ShelfUpdated,
+    /// The setup page saved new settings.
+    Reload,
+    /// The setup page is open at this address (`None`: closed).
+    Setup(Option<String>),
+    /// Someone opened the setup page.
+    SetupVisited,
 }
 
 struct Args {
@@ -47,10 +61,11 @@ struct Args {
     size: Option<(usize, usize)>,
     bench: bool,
     idle: bool,
+    setup: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { snapshot: None, size: None, bench: false, idle: false };
+    let mut a = Args { snapshot: None, size: None, bench: false, idle: false, setup: false };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -58,10 +73,13 @@ fn parse_args() -> Result<Args, String> {
             "--size" => a.size = Some(parse_size(&it.next().ok_or("--size needs WIDTHxHEIGHT")?)?),
             "--bench" => a.bench = true,
             "--idle" => a.idle = true,
+            "--setup" => a.setup = true,
             "-h" | "--help" => {
                 println!(
-                    "now-playing [--size WxH] [--snapshot out.png [--idle]] [--bench]\n\n\
-                     env: LASTFM_USER, LASTFM_API_KEY   (required)\n     \
+                    "now-playing [--size WxH] [--setup] [--snapshot out.png [--idle]] [--bench]\n\n\
+                     Not set up yet (or --setup, or SIGUSR1): shows a QR code for the setup page.\n\
+                     Settings come from the environment, else from the settings file the page writes.\n\n\
+                     LASTFM_USER, LASTFM_API_KEY   your Last.fm account\n     \
                      THEME            vinyl (default), poster or ambient\n     \
                      CLOCK            24h (default) or 12h\n     \
                      VINYLVAULT_SHELF your shared VinylVault shelf link or slug: draws your pressing\n     \
@@ -72,7 +90,7 @@ fn parse_args() -> Result<Args, String> {
                      CONNECTOR        screen to use, e.g. HDMI-A-1 or DSI-1 (default: first connected)\n     \
                      FONT_LIGHT, FONT_REGULAR, FONT_BOLD, FONT_BLACK   font file overrides\n\n\
                      On Linux it draws straight to the screen (DRM/KMS); on macOS it opens a\n\
-                     window (keys: 1 vinyl, 2 poster, 3 ambient, I preview idle, Esc quit)."
+                     window (keys: 1 vinyl, 2 poster, 3 ambient, I preview idle, S setup, Esc quit)."
                 );
                 std::process::exit(0);
             }
@@ -92,14 +110,15 @@ fn parse_size(s: &str) -> Result<(usize, usize), String> {
 }
 
 fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    settings::get(k)
 }
 
-fn lastfm_config() -> Result<lastfm::Config, String> {
-    Ok(lastfm::Config {
-        user: env("LASTFM_USER").ok_or("set LASTFM_USER")?,
-        api_key: env("LASTFM_API_KEY").ok_or("set LASTFM_API_KEY (free: https://www.last.fm/api/account/create)")?,
-        api_url: env("LASTFM_API_URL").unwrap_or_else(|| "https://ws.audioscrobbler.com/2.0/".into()),
+/// `None` until a Last.fm user and key are set up.
+fn lastfm_config() -> Option<lastfm::Config> {
+    Some(lastfm::Config {
+        user: env("LASTFM_USER")?,
+        api_key: env("LASTFM_API_KEY").or_else(|| lastfm::builtin_key().map(String::from))?,
+        api_url: env("LASTFM_API_URL").unwrap_or_else(|| lastfm::API_URL.into()),
         poll: Duration::from_secs_f32(env("POLL_SECS").and_then(|v| v.parse().ok()).unwrap_or(2.0f32).clamp(1.0, 60.0)),
     })
 }
@@ -136,7 +155,6 @@ fn look() -> Result<Look, String> {
 }
 
 fn main() {
-    mac_app::load_settings();
     if let Err(e) = run() {
         eprintln!("now-playing: {e}");
         mac_app::show_error(&e);
@@ -144,81 +162,27 @@ fn main() {
     }
 }
 
-/// The Mac app is opened from Finder, so it has no shell environment: it reads
-/// its settings from a file instead and shows problems in a dialog.
 mod mac_app {
-    use std::path::PathBuf;
     use std::process::Command;
 
-    const TEMPLATE: &str = "\
-# Now Playing settings: one NAME=value per line. Lines starting with # are ignored.
-# Your Last.fm user name and API key (free: https://www.last.fm/api/account/create)
-LASTFM_USER=
-LASTFM_API_KEY=
-
-# Look: vinyl, poster or ambient
-#THEME=vinyl
-#CLOCK=24h
-# Your shared VinylVault shelf link
-#VINYLVAULT_SHELF=
-";
-
-    pub fn settings_path() -> Option<PathBuf> {
-        let home = std::env::var_os("HOME")?;
-        Some(PathBuf::from(home).join("Library/Application Support/Now Playing/settings"))
-    }
-
-    /// Opened from Finder/Dock/`open`: macOS starts the app itself (parent is
-    /// launchd), with no terminal. Scripts and terminals never get dialogs.
-    fn from_finder() -> bool {
+    /// Opened from Finder/Dock: macOS started it (parent is launchd), no terminal.
+    pub fn from_finder() -> bool {
         cfg!(target_os = "macos") && unsafe { libc::getppid() == 1 && libc::isatty(2) == 0 }
     }
 
-    /// Fill in settings that aren't already set in the environment.
-    pub fn load_settings() {
-        if !cfg!(target_os = "macos") {
-            return;
-        }
-        let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return };
-        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-            if let Some((k, v)) = line.split_once('=') {
-                let (k, v) = (k.trim(), v.trim());
-                if !k.is_empty() && std::env::var_os(k).is_none() {
-                    // SAFETY: called first thing in main, before any thread exists.
-                    unsafe { std::env::set_var(k, v) };
-                }
-            }
+    /// From Finder there's no terminal to print to: show a dialog.
+    pub fn show_error(e: &str) {
+        if from_finder() {
+            // Passed as an argument, not spliced into the script.
+            let _ = Command::new("osascript")
+                .args(["-e", "on run argv", "-e", "display alert \"Now Playing\" message (item 1 of argv)", "-e", "end run", e])
+                .status();
         }
     }
 
-    /// From Finder there's no terminal to print to: show a dialog, and when
-    /// Last.fm isn't set up yet, create the settings file and open it.
-    pub fn show_error(e: &str) {
-        if !from_finder() {
-            return;
-        }
-        let Some(path) = settings_path() else { return };
-        let missing = e.contains("LASTFM_USER") || e.contains("LASTFM_API_KEY");
-        if missing && !path.exists() {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&path, TEMPLATE);
-            // Owner only: it will hold an API key.
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
-        let msg = if missing {
-            "Add your Last.fm user name and API key to the settings file that opens next, save it, and start Now Playing again.".to_string()
-        } else {
-            e.to_string()
-        };
-        // Passed as an argument, not spliced into the script.
-        let _ = Command::new("osascript")
-            .args(["-e", "on run argv", "-e", "display alert \"Now Playing\" message (item 1 of argv)", "-e", "end run", &msg])
-            .status();
-        if missing {
-            let _ = Command::new("open").arg("-t").arg(&path).status();
+    pub fn open_browser(url: &str) {
+        if cfg!(target_os = "macos") {
+            let _ = Command::new("open").arg(url).status();
         }
     }
 }
@@ -228,6 +192,7 @@ fn run() -> Result<(), String> {
     unsafe {
         libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(libc::SIGUSR1, on_setup_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
     }
     let look = look()?;
     let fonts = fonts::Fonts::discover()?;
@@ -239,33 +204,35 @@ fn run() -> Result<(), String> {
 
     let opts = display_options(args.size)?;
     let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
-    let tx = msg_tx.clone();
-    lastfm::spawn(lastfm_config()?, move |u| tx.send(Msg::Lastfm(u)).is_ok());
 
-    let shelf_setting = env("VINYLVAULT_SHELF");
-    let catalogue = match env("VINYLVAULT_CATALOGUE").as_deref() {
-        Some("off" | "0" | "false" | "no") => None,
-        _ => Some(vinylvault::Catalogue::new(&vinylvault::base_url(shelf_setting.as_deref()))),
-    };
     if let Some(path) = args.snapshot {
-        let shelf = match &shelf_setting {
-            Some(s) => Some(vinylvault::load_once(s)?),
+        let size = args.size.unwrap_or((800, 480));
+        if args.setup {
+            let view = View::Setup { url: "http://192.168.1.23:8737/k7m2qx9p4a/", connected: false };
+            return save_png(&scene::render(&fonts, size.0, size.1, &view, SystemTime::now(), look.theme, false, false), size.0, &path);
+        }
+        let cfg = lastfm_config().ok_or("Last.fm isn't set up yet: start it without --snapshot and use the setup page")?;
+        let tx = msg_tx.clone();
+        lastfm::spawn(cfg, Default::default(), move |u| tx.send(Msg::Lastfm(u)).is_ok());
+        let shelf = match env("VINYLVAULT_SHELF") {
+            Some(s) => Some(vinylvault::load_once(&s)?),
             None => None,
         };
-        let records = Records { shelf, catalogue };
-        return snapshot(&fonts, &look, &records, msg_rx, args.size.unwrap_or((800, 480)), args.idle, &path);
+        let records = Records { shelf, catalogue: catalogue() };
+        return snapshot(&fonts, &look, &records, msg_rx, size, args.idle, &path);
     }
-    let shelf = shelf_setting.map(|s| {
-        let tx = msg_tx.clone();
-        vinylvault::spawn(&s, move || tx.send(Msg::ShelfUpdated).is_ok())
-    });
-    let records = Records { shelf, catalogue };
+
+    // Not set up yet: open the setup page (and on a Mac, the browser).
+    if lastfm_config().is_none() || args.setup {
+        open_setup(&msg_tx, mac_app::from_finder() || args.setup);
+    }
 
     let Some(mut display) = wait_for_display(&opts) else { return Ok(()) };
     let (mut w, mut h) = display.size();
 
     let (scene_tx, scene_rx) = mpsc::channel::<(Scene, bool)>();
-    thread::spawn(move || compose_loop(fonts, look, records, (w, h), msg_rx, scene_tx));
+    let tx = msg_tx.clone();
+    thread::spawn(move || compose_loop(fonts, look, (w, h), tx, msg_rx, scene_tx));
 
     let mut comp = frame::Compositor::new(w, h);
     loop {
@@ -285,11 +252,18 @@ fn run() -> Result<(), String> {
             }
             Status::Resized => {}
         }
+        if SETUP.swap(false, Ordering::Relaxed) {
+            open_setup(&msg_tx, false);
+        }
         if let Some(k) = display.key() {
             let msg = match k {
                 '1' => Msg::Theme(Theme::Vinyl),
                 '2' => Msg::Theme(Theme::Poster),
                 '3' => Msg::Theme(Theme::Ambient),
+                's' => {
+                    open_setup(&msg_tx, true);
+                    continue;
+                }
                 _ => Msg::ToggleIdlePreview,
             };
             let _ = msg_tx.send(msg);
@@ -335,6 +309,36 @@ fn until_next_minute() -> Duration {
     Duration::from_millis(60_000 - ms % 60_000 + 50)
 }
 
+/// Starts the setup page (if it isn't open) and tells the display to show its QR code.
+fn open_setup(tx: &mpsc::Sender<Msg>, browser: bool) {
+    let t = tx.clone();
+    let started = setup::start(move |e| {
+        let _ = t.send(match e {
+            setup::Event::Visited => Msg::SetupVisited,
+            setup::Event::Saved => Msg::Reload,
+            setup::Event::Closed => Msg::Setup(None),
+        });
+    });
+    match started {
+        Ok(Some(s)) => {
+            eprintln!("setup page: {}", s.url);
+            let _ = tx.send(Msg::Setup(Some(s.url)));
+            if browser {
+                mac_app::open_browser(&s.local_url);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("{e}"),
+    }
+}
+
+fn catalogue() -> Option<vinylvault::Catalogue> {
+    match env("VINYLVAULT_CATALOGUE").as_deref() {
+        Some("off" | "0" | "false" | "no") => None,
+        _ => Some(vinylvault::Catalogue::new(&vinylvault::base_url(env("VINYLVAULT_SHELF").as_deref()))),
+    }
+}
+
 /// Where pressings come from: your shelf first, then the public catalogue.
 struct Records {
     shelf: Option<vinylvault::Shelf>,
@@ -352,38 +356,84 @@ impl Records {
     }
 }
 
+/// The running Last.fm poller and the account it polls.
+struct Poller {
+    account: Option<(String, String)>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Poller {
+    /// (Re)starts polling if the account changed. Returns true if it did.
+    fn sync(&mut self, tx: &mpsc::Sender<Msg>) -> bool {
+        let cfg = lastfm_config();
+        let account = cfg.as_ref().map(|c| (c.user.clone(), c.api_key.clone()));
+        if account == self.account {
+            return false;
+        }
+        self.stop.store(true, Ordering::Relaxed);
+        self.stop = Arc::new(AtomicBool::new(false));
+        self.account = account;
+        if let Some(cfg) = cfg {
+            let tx = tx.clone();
+            lastfm::spawn(cfg, self.stop.clone(), move |u| tx.send(Msg::Lastfm(u)).is_ok());
+        }
+        true
+    }
+}
+
+fn spawn_shelf(tx: &mpsc::Sender<Msg>) -> (Option<String>, Option<vinylvault::Shelf>) {
+    let setting = env("VINYLVAULT_SHELF");
+    let shelf = setting.as_ref().map(|s| {
+        let tx = tx.clone();
+        vinylvault::spawn(s, move || tx.send(Msg::ShelfUpdated).is_ok())
+    });
+    (setting, shelf)
+}
+
 fn compose_loop(
     fonts: fonts::Fonts,
     mut look: Look,
-    records: Records,
     size: (usize, usize),
+    me: mpsc::Sender<Msg>,
     rx: mpsc::Receiver<Msg>,
     tx: mpsc::Sender<(Scene, bool)>,
 ) {
     let (mut w, mut h) = size;
+    let mut poller = Poller { account: None, stop: Arc::new(AtomicBool::new(false)) };
+    poller.sync(&me);
+    let (mut shelf_setting, shelf) = spawn_shelf(&me);
+    let mut records = Records { shelf, catalogue: catalogue() };
     let mut track: Option<Option<lastfm::Track>> = None; // None = no answer from Last.fm yet
     let mut error: Option<String> = None;
     let mut preview_idle = false;
     let mut shown: Option<String> = None;
+    let mut setup_url: Option<String> = None;
+    let mut setup_visited = false;
 
     loop {
+        let configured = poller.account.is_some();
         let idle = preview_idle || !track.as_ref().is_some_and(|t| t.as_ref().is_some_and(|t| t.playing));
         // Only the vinyl look draws pressings: don't search the catalogue for the others.
         let pressing = match &track {
             Some(Some(t)) if look.theme == Theme::Vinyl => records.pressing(t),
             _ => None,
         };
-        let view = match &track {
-            None => View::Connecting(error.as_deref()),
-            Some(t) => View::Track { track: t.as_ref(), idle, pressing: pressing.as_ref() },
+        // The QR code stays up until the page is opened (or, before the first
+        // setup, until Last.fm works), so a new look can be seen right away.
+        let view = match (&setup_url, &track) {
+            (Some(url), _) if !configured || !setup_visited => View::Setup { url, connected: setup_visited },
+            (None, _) if !configured => View::Connecting(Some("Not set up yet")),
+            (_, None) => View::Connecting(error.as_deref()),
+            (_, Some(t)) => View::Track { track: t.as_ref(), idle, pressing: pressing.as_ref() },
         };
         // Crossfade when what's shown changes in kind (song, playing/idle, theme);
         // swap instantly for small updates such as the clock ticking.
         let key = format!(
-            "{:?}|{idle}|{:?}|{:?}",
+            "{:?}|{idle}|{:?}|{:?}|{}",
             look.theme,
             pressing.as_ref().map(|p| &p.name),
-            track.as_ref().map(|t| t.as_ref().map(|t| (t.title.clone(), t.artist.clone(), t.album.clone())))
+            track.as_ref().map(|t| t.as_ref().map(|t| (t.title.clone(), t.artist.clone(), t.album.clone()))),
+            matches!(view, View::Setup { .. })
         );
         let fade = shown.as_ref().is_some_and(|s| *s != key);
         shown = Some(key);
@@ -413,6 +463,24 @@ fn compose_loop(
             Ok(Msg::Theme(t)) => look.theme = t,
             Ok(Msg::ToggleIdlePreview) => preview_idle = !preview_idle,
             Ok(Msg::ShelfUpdated) => {}
+            Ok(Msg::Reload) => {
+                if let Ok(l) = self::look() {
+                    look = l;
+                }
+                if poller.sync(&me) {
+                    (track, error) = (None, None);
+                }
+                if env("VINYLVAULT_SHELF") != shelf_setting {
+                    let (setting, shelf) = spawn_shelf(&me);
+                    shelf_setting = setting;
+                    records = Records { shelf, catalogue: catalogue() };
+                }
+            }
+            Ok(Msg::Setup(url)) => {
+                setup_visited = false;
+                setup_url = url;
+            }
+            Ok(Msg::SetupVisited) => setup_visited = true,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
@@ -443,8 +511,12 @@ fn snapshot(
         println!("{} pressing: {}", if p.owned { "your" } else { "catalogue" }, p.caption());
     }
     let view = View::Track { track: track.as_ref(), idle, pressing: pressing.as_ref() };
-    let scene = scene::render(fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour, look.promo);
-    let pixels = still(&scene, w);
+    save_png(&scene::render(fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour, look.promo), w, path)
+}
+
+fn save_png(scene: &Scene, w: usize, path: &str) -> Result<(), String> {
+    let pixels = still(scene, w);
+    let h = pixels.len() / w;
     let rgb: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
     image::save_buffer(path, &rgb, w as u32, h as u32, image::ColorType::Rgb8).map_err(|e| e.to_string())?;
     println!("wrote {path} ({w}x{h})");

@@ -48,6 +48,7 @@ impl Display for Win {
             Key::Key2 => Some('2'),
             Key::Key3 => Some('3'),
             Key::I => Some('i'),
+            Key::S => Some('s'),
             _ => None,
         })
     }

@@ -3,6 +3,8 @@
 
 use std::io::Read;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +13,15 @@ use serde::Deserialize;
 
 /// Last.fm's grey-star placeholder image. Treated as "no artwork".
 const PLACEHOLDER: &str = "2a96cbd8b46e442fc41c2b86b821562f";
+
+pub const API_URL: &str = "https://ws.audioscrobbler.com/2.0/";
+
+/// The app's own API key, built in by `pi/build.sh` / `mac/bundle.sh` from
+/// ~/.config/now-playing/build.env (never in the repo). With it, people only
+/// need their Last.fm user name. A key in the settings still wins.
+pub fn builtin_key() -> Option<&'static str> {
+    option_env!("LASTFM_APP_KEY").map(str::trim).filter(|k| !k.is_empty())
+}
 
 #[derive(Clone)]
 pub struct Track {
@@ -30,6 +41,7 @@ pub enum Update {
     Error(String),
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub user: String,
     pub api_key: String,
@@ -206,7 +218,8 @@ fn fetch_art(agent: &ureq::Agent, url: &str) -> Option<RgbaImage> {
     None
 }
 
-pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
+/// Polls until `send` returns false or `stop` is set (e.g. the account changed).
+pub fn spawn(cfg: Config, stop: Arc<AtomicBool>, send: impl Fn(Update) -> bool + Send + 'static) {
     thread::spawn(move || {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(10))
@@ -279,7 +292,16 @@ pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
             } else {
                 (cfg.poll * 2u32.saturating_pow(failures.min(5))).min(Duration::from_secs(60))
             };
-            thread::sleep(wait);
+            let until = std::time::Instant::now() + wait;
+            while std::time::Instant::now() < until {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100).min(until.saturating_duration_since(std::time::Instant::now())));
+            }
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
         }
     });
 }
@@ -331,6 +353,30 @@ fn encode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// One request to see whether a user name + key work. Returns the most
+/// recent track (without artwork) or a message fit for the setup page.
+pub fn check(cfg: &Config) -> Result<Option<Track>, String> {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(8)).user_agent("now-playing-display/0.1").build();
+    let url = format!(
+        "{}?method=user.getrecenttracks&user={}&api_key={}&format=json&limit=1",
+        cfg.api_url,
+        encode(&cfg.user),
+        encode(&cfg.api_key)
+    );
+    let body = get(&agent, &url).map_err(|e| {
+        if e.contains("User not found") {
+            "Last.fm doesn't know that user name.".to_string()
+        } else if e.contains("Invalid API key") || e.contains("Invalid API Key") {
+            "Last.fm doesn't accept that API key.".to_string()
+        } else if e.starts_with("network error") {
+            "Can't reach Last.fm. Is the display online?".to_string()
+        } else {
+            e
+        }
+    })?;
+    parse(&String::from_utf8(body).map_err(|e| e.to_string())?)
 }
 
 #[cfg(test)]

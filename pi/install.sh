@@ -4,18 +4,13 @@
 #   Pi 3  → 64-bit OS, uses dist/now-playing-pi3 (or 32-bit OS with the pi2 build)
 #
 # From the Mac:   scp -r dist pi <user>@<pi-name>.local:now-playing/
-# On the Pi:      bash now-playing/pi/install.sh <lastfm-username> <lastfm-api-key>
+# On the Pi:      bash now-playing/pi/install.sh
 #
-# Safe to re-run (e.g. to update the binary or change the username/key).
+# Then scan the QR code on the screen to connect Last.fm and pick a look.
+# Safe to re-run, e.g. to update the binary.
 set -euo pipefail
 
-LASTFM_USER="${1:-}"
-LASTFM_API_KEY="${2:-}"
-if [[ -z "$LASTFM_USER" || -z "$LASTFM_API_KEY" ]]; then
-  echo "usage: bash install.sh <lastfm-username> <lastfm-api-key>" >&2
-  echo "       free API key: https://www.last.fm/api/account/create" >&2
-  exit 1
-fi
+STATE=/var/lib/now-playing
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 case "$(uname -m)" in
@@ -32,16 +27,19 @@ sudo apt-get install -y -qq fontconfig fonts-inter
 echo "==> Installing $(basename "$BIN") to /usr/local/bin/now-playing"
 sudo install -m 755 "$BIN" /usr/local/bin/now-playing
 
-echo "==> Saving Last.fm settings"
-# Create the file locked down *before* the key goes in (no readable window).
+echo "==> Settings"
+# The setup page writes $STATE/settings. Older installs kept the account in
+# /etc/now-playing/env, where the setup page couldn't change it: move it over once.
+sudo install -d -o "$USER" -m 700 "$STATE"
+if sudo test -f /etc/now-playing/env && sudo grep -q '^LASTFM_USER=' /etc/now-playing/env && ! sudo test -f "$STATE/settings"; then
+  sudo install -o "$USER" -m 600 /dev/null "$STATE/settings"
+  sudo grep -E '^(LASTFM_USER|LASTFM_API_KEY|THEME|CLOCK|VINYLVAULT_SHELF)=' /etc/now-playing/env | sudo tee "$STATE/settings" >/dev/null
+fi
+# Only fixed, screen-related options go into the service environment
+# (values there can't be changed from the setup page).
 sudo install -d -m 700 /etc/now-playing
 sudo install -m 600 /dev/null /etc/now-playing/env
 sudo tee /etc/now-playing/env >/dev/null <<EOF
-LASTFM_USER=$LASTFM_USER
-LASTFM_API_KEY=$LASTFM_API_KEY
-${THEME:+THEME=$THEME}
-${CLOCK:+CLOCK=$CLOCK}
-${VINYLVAULT_SHELF:+VINYLVAULT_SHELF=$VINYLVAULT_SHELF}
 ${VINYLVAULT_CATALOGUE:+VINYLVAULT_CATALOGUE=$VINYLVAULT_CATALOGUE}
 ${PROMO:+PROMO=$PROMO}
 ${ROTATE:+ROTATE=$ROTATE}
@@ -59,6 +57,9 @@ Wants=network-online.target
 User=$USER
 SupplementaryGroups=video render
 EnvironmentFile=/etc/now-playing/env
+# Settings written by the setup page: /var/lib/now-playing/settings
+StateDirectory=now-playing
+StateDirectoryMode=0700
 ExecStart=/usr/local/bin/now-playing
 Restart=always
 RestartSec=3
@@ -89,5 +90,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable now-playing.service
 sudo systemctl restart now-playing.service
 
-echo "==> Done. Status: systemctl status now-playing   Log: journalctl -u now-playing -f"
+echo "==> Done. Scan the QR code on the screen to finish setting up."
+echo "    Open the setup page again later: sudo systemctl kill -s USR1 now-playing"
+echo "    Status: systemctl status now-playing   Log: journalctl -u now-playing -f"
 echo "    Reboot once so the console settings apply: sudo reboot"
