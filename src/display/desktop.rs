@@ -23,6 +23,18 @@ const FRAME: Duration = Duration::from_nanos(16_666_667);
 /// `open_settings`: show the settings right away (not set up yet).
 pub fn run(player: Player, size: (usize, usize), open_settings: bool) -> Result<(), String> {
     let el = EventLoop::new().map_err(|e| e.to_string())?;
+    // macOS throttles apps in the background ("App Nap"): timers and network
+    // were held back for seconds while Tidal was in front. A display has to
+    // react at once, so opt out for as long as the app runs (the Mac may
+    // still sleep).
+    #[cfg(target_os = "macos")]
+    let _awake = {
+        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+        NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep | NSActivityOptions::LatencyCritical,
+            &NSString::from_str("Showing what's playing"),
+        )
+    };
     let mut app = App {
         player,
         size,

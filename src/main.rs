@@ -99,6 +99,9 @@ impl Player {
     pub fn frame(&mut self) -> display::Dirty {
         // Newest finished frame, if any (ignoring ones rendered for an old size).
         if let Some((scene, fade)) = self.scene_rx.try_iter().filter(|(s, _)| self.comp.accepts(s)).last() {
+            if fade {
+                draw::trace(format_args!("on screen: crossfade starts (0.45 s)"));
+            }
             self.comp.set_scene(scene, fade);
         }
         self.comp.frame()
@@ -202,7 +205,7 @@ fn parse_args() -> Result<Args, String> {
                      VINYLVAULT_CATALOGUE  on (default) or off: else draw a real pressing of the album\n     \
                      PROMO            on (default) or off: the small VinylVault mentions\n     \
                      STATS            on (default) or off: your play counts under the playing track\n     \
-                     POLL_SECS        seconds between Last.fm checks (default 2; 1 s near a track's end)\n     \
+                     POLL_SECS        seconds between Last.fm checks (default 1)\n     \
                      ROTATE           0, 90, 180 or 270 (default: what the panel reports, else 0)\n     \
                      CONNECTOR        screen to use, e.g. HDMI-A-1 or DSI-1 (default: first connected)\n     \
                      FONT_LIGHT, FONT_REGULAR, FONT_BOLD, FONT_BLACK   font file overrides\n\n\
@@ -236,7 +239,7 @@ fn lastfm_config() -> Option<lastfm::Config> {
         user: env("LASTFM_USER")?,
         api_key: env("LASTFM_API_KEY").or_else(|| lastfm::builtin_key().map(String::from))?,
         api_url: env("LASTFM_API_URL").unwrap_or_else(|| lastfm::API_URL.into()),
-        poll: Duration::from_secs_f32(env("POLL_SECS").and_then(|v| v.parse().ok()).unwrap_or(2.0f32).clamp(1.0, 60.0)),
+        poll: Duration::from_secs_f32(env("POLL_SECS").and_then(|v| v.parse().ok()).unwrap_or(1.0f32).clamp(1.0, 60.0)),
     })
 }
 
@@ -460,27 +463,39 @@ fn open_setup(tx: &mpsc::Sender<Msg>, browser: bool) {
     }
 }
 
-fn catalogue() -> Option<vinylvault::Catalogue> {
+fn catalogue() -> Option<Arc<vinylvault::Catalogue>> {
     match env("VINYLVAULT_CATALOGUE").as_deref() {
         Some("off" | "0" | "false" | "no") => None,
-        _ => Some(vinylvault::Catalogue::new(&vinylvault::site())),
+        _ => Some(Arc::new(vinylvault::Catalogue::new(&vinylvault::site()))),
     }
 }
 
 /// Where pressings come from: your shelf first, then the public catalogue.
 struct Records {
     shelf: Option<vinylvault::Shelf>,
-    catalogue: Option<vinylvault::Catalogue>,
+    catalogue: Option<Arc<vinylvault::Catalogue>>,
 }
 
 impl Records {
-    fn pressing(&self, t: &lastfm::Track) -> Option<vinylvault::Pressing> {
+    /// `later`: don't wait for the catalogue; ask it in the background and
+    /// send `ShelfUpdated` when it answers (the record then fades to it).
+    fn pressing(&self, t: &lastfm::Track, later: Option<&mpsc::Sender<Msg>>) -> Option<vinylvault::Pressing> {
         // On your shelf decides it, even when it's plain black: never dress your
         // own black copy up as somebody else's coloured one.
         if let Some(on_shelf) = self.shelf.as_ref().and_then(|s| vinylvault::lookup(s, &t.album, &t.artist)) {
             return on_shelf;
         }
-        self.catalogue.as_ref().and_then(|c| c.pressing_for(&t.album, &t.artist))
+        let c = self.catalogue.as_ref()?;
+        match later {
+            None => c.pressing_for(&t.album, &t.artist),
+            Some(tx) => c.cached(&t.album, &t.artist).unwrap_or_else(|| {
+                let tx = tx.clone();
+                c.fetch_later(&t.album, &t.artist, move || {
+                    let _ = tx.send(Msg::ShelfUpdated);
+                });
+                None
+            }),
+        }
     }
 
     /// The album is on your shelf (any copy, coloured or black).
@@ -547,10 +562,12 @@ fn compose_loop(
         let configured = poller.account.is_some();
         let idle = preview_idle || !track.as_ref().is_some_and(|t| t.as_ref().is_some_and(|t| t.playing));
         // Only the vinyl look draws pressings: don't search the catalogue for the others.
+        let t0 = Instant::now();
         let pressing = match &track {
-            Some(Some(t)) if look.theme == Theme::Vinyl => records.pressing(t),
+            Some(Some(t)) if look.theme == Theme::Vinyl => records.pressing(t, Some(&me)),
             _ => None,
         };
+        let pressing_ms = t0.elapsed().as_millis();
         // The QR code stays up until the page is opened (or, before the first
         // setup, until Last.fm works), so a new look can be seen right away.
         let view = match (&setup_url, &track) {
@@ -568,13 +585,17 @@ fn compose_loop(
             "{:?}|{idle}|{:?}|{:?}|{}",
             look.theme,
             pressing.as_ref().map(|p| &p.name),
-            track.as_ref().map(|t| t.as_ref().map(|t| (t.title.clone(), t.artist.clone(), t.album.clone()))),
+            // The cover arriving after the song (slow download) fades in too.
+            track.as_ref().map(|t| t.as_ref().map(|t| (t.title.clone(), t.artist.clone(), t.album.clone(), t.art.is_some()))),
             matches!(view, View::Setup { .. })
         );
         let fade = shown.as_ref().is_some_and(|s| *s != key);
         shown = Some(key);
 
         let scene = scene::render(&fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour, look.promo);
+        if fade {
+            draw::trace(format_args!("compose: frame ready (pressing lookup {pressing_ms} ms, total {} ms)", t0.elapsed().as_millis()));
+        }
         if tx.send((scene, fade)).is_err() {
             return;
         }
@@ -582,6 +603,19 @@ fn compose_loop(
         // Wake on the next minute (clock), or on news.
         match rx.recv_timeout(until_next_minute()) {
             Ok(Msg::Lastfm(lastfm::Update::Track(mut t))) => {
+                draw::trace(format_args!("compose: got the track"));
+                // Cover and play counts can arrive separately, in any order:
+                // for the same song, keep what's already known.
+                if let (Some(Some(old)), Some(new)) = (&track, t.as_mut()) {
+                    if (&old.title, &old.artist, &old.album, &old.art_url) == (&new.title, &new.artist, &new.album, &new.art_url) {
+                        if new.art.is_none() {
+                            new.art = old.art.clone();
+                        }
+                        if new.stats.is_none() {
+                            new.stats = old.stats.clone();
+                        }
+                    }
+                }
                 if !look.stats {
                     t.iter_mut().for_each(|t| t.stats = None);
                 }
@@ -660,7 +694,7 @@ fn snapshot(
         track.iter_mut().for_each(|t| t.stats = None);
     }
     let idle = idle || !track.as_ref().is_some_and(|t| t.playing);
-    let pressing = track.as_ref().and_then(|t| records.pressing(t));
+    let pressing = track.as_ref().and_then(|t| records.pressing(t, None));
     if let Some(p) = &pressing {
         println!("{} pressing: {}", if p.owned { "your" } else { "catalogue" }, p.caption());
     }

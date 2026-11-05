@@ -9,6 +9,16 @@ use tiny_skia::{Color, FillRule, GradientStop, LinearGradient, Paint, Path, Path
 
 pub type Rgba = [f32; 4];
 
+/// `NP_TRACE=1` prints a timestamped line for each step of a song change
+/// (Last.fm answer, cover, pressing, on screen), to see where time goes.
+pub fn trace(msg: std::fmt::Arguments) {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    if std::env::var_os("NP_TRACE").is_some() {
+        let t = START.get_or_init(std::time::Instant::now).elapsed();
+        eprintln!("[{:8.3}] {msg}", t.as_secs_f64());
+    }
+}
+
 /// `NP_PROFILE=1` prints how long each rendering stage takes (for tuning on the Pi).
 pub struct Prof(&'static str, std::time::Instant);
 impl Prof {

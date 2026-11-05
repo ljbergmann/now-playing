@@ -363,12 +363,38 @@ pub struct Catalogue {
     base: String,
     agent: ureq::Agent,
     cache: Mutex<HashMap<String, Option<Pressing>>>,
+    /// Albums being looked up right now.
+    pending: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Catalogue {
     pub fn new(base: &str) -> Self {
         let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(6)).user_agent("now-playing-display/0.2").build();
-        Catalogue { base: base.trim_end_matches('/').to_string(), agent, cache: Mutex::new(HashMap::new()) }
+        Catalogue { base: base.trim_end_matches('/').to_string(), agent, cache: Mutex::new(HashMap::new()), pending: Mutex::new(Default::default()) }
+    }
+
+    /// What's known without asking: `None` = not looked up yet.
+    pub fn cached(&self, album: &str, artist: &str) -> Option<Option<Pressing>> {
+        let key = format!("{}|{}", primary_artist(artist), norm_title(album));
+        self.cache.lock().ok()?.get(&key).cloned()
+    }
+
+    /// Looks it up on another thread (once per album), then calls `done`, so
+    /// a new song shows at once and its pressing follows.
+    pub fn fetch_later(self: &Arc<Self>, album: &str, artist: &str, done: impl FnOnce() + Send + 'static) {
+        let key = format!("{}|{}", primary_artist(artist), norm_title(album));
+        let new = self.pending.lock().is_ok_and(|mut p| p.insert(key.clone()));
+        if !new {
+            return;
+        }
+        let (me, album, artist) = (self.clone(), album.to_string(), artist.to_string());
+        thread::spawn(move || {
+            let _ = me.pressing_for(&album, &artist);
+            if let Ok(mut p) = me.pending.lock() {
+                p.remove(&key);
+            }
+            done();
+        });
     }
 
     pub fn pressing_for(&self, album: &str, artist: &str) -> Option<Pressing> {

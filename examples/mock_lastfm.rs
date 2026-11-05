@@ -3,6 +3,8 @@
 //!
 //! Switch scenarios with: curl -X POST localhost:9911/mode/<playing|stopped|noart|long>
 //!
+//! MOCK_ART_DELAY_MS slows down cover downloads (e.g. 2000).
+//!
 //! MOCK_ARTIST / MOCK_ALBUM / MOCK_TITLE override the "playing" track (e.g. to
 //! try the VinylVault catalogue fallback with a real album).
 //!
@@ -137,6 +139,10 @@ fn main() {
             continue;
         }
         if url.starts_with("/i/u/") {
+            // MOCK_ART_DELAY_MS: a slow image server.
+            if let Some(ms) = std::env::var("MOCK_ART_DELAY_MS").ok().and_then(|v| v.parse().ok()) {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             // Track-specific art; the 770px size exists, like on the real CDN.
             let hue = if url.contains("b.png") { 20.0 } else { 280.0 };
             let png = Header::from_bytes("Content-Type", "image/png").unwrap();

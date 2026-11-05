@@ -281,7 +281,8 @@ fn fetch_art(agent: &ureq::Agent, url: &str) -> Option<RgbaImage> {
 }
 
 /// Polls until `send` returns false or `stop` is set (e.g. the account changed).
-pub fn spawn(cfg: Config, stop: Arc<AtomicBool>, send: impl Fn(Update) -> bool + Send + 'static) {
+pub fn spawn(cfg: Config, stop: Arc<AtomicBool>, send: impl Fn(Update) -> bool + Send + Sync + 'static) {
+    let send = Arc::new(send);
     thread::spawn(move || {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(10))
@@ -293,8 +294,17 @@ pub fn spawn(cfg: Config, stop: Arc<AtomicBool>, send: impl Fn(Update) -> bool +
             encode(&cfg.user),
             encode(&cfg.api_key)
         );
+        // Covers get a short first try; a slow one is fetched after the song
+        // is already on screen (it then fades in).
+        let quick = ureq::AgentBuilder::new()
+            .timeout(Duration::from_millis(600))
+            .user_agent("now-playing-display/0.1")
+            .build();
         let mut last: Option<(String, String, String, String, bool, Option<SystemTime>)> = None;
-        let mut art_cache: Option<(String, Option<std::sync::Arc<RgbaImage>>)> = None;
+        // The last cover (shared with the thread that fetches slow ones).
+        let art_cache: Arc<std::sync::Mutex<Option<(String, Option<Arc<RgbaImage>>)>>> = Default::default();
+        // What's on screen now, so a slow cover never lands on a newer song.
+        let showing: Arc<std::sync::Mutex<Option<(String, String)>>> = Default::default();
         let mut failures: u32 = 0;
         // The playing track as first seen, and its length, for timing the polls.
         let mut current: Option<(String, String)> = None;
@@ -303,6 +313,7 @@ pub fn spawn(cfg: Config, stop: Arc<AtomicBool>, send: impl Fn(Update) -> bool +
         let mut stats: Option<Stats> = None;
 
         loop {
+            let asked = std::time::Instant::now();
             let result = get(&agent, &url)
                 .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
                 .and_then(|s| parse(&s));
@@ -313,16 +324,29 @@ pub fn spawn(cfg: Config, stop: Arc<AtomicBool>, send: impl Fn(Update) -> bool +
                         (t.title.clone(), t.artist.clone(), t.album.clone(), t.art_url.clone(), t.playing, t.played_at)
                     });
                     if sig != last {
+                        crate::draw::trace(format_args!(
+                            "Last.fm: new state ({}), poll took {} ms",
+                            track.as_ref().map(|t| format!("{}{}", t.title, if t.playing { ", playing" } else { "" })).unwrap_or_default(),
+                            asked.elapsed().as_millis()
+                        ));
                         last = sig;
+                        let mut slow_art: Option<String> = None;
                         let track = track.map(|mut t| {
-                            let cached = art_cache.as_ref().filter(|(u, _)| *u == t.art_url);
+                            let cached = art_cache.lock().ok().and_then(|c| c.clone()).filter(|(u, _)| *u == t.art_url);
                             t.art = match cached {
-                                Some((_, art)) => art.clone(),
-                                None => {
-                                    let art = fetch_art(&agent, &t.art_url).map(std::sync::Arc::new);
-                                    art_cache = Some((t.art_url.clone(), art.clone()));
-                                    art
-                                }
+                                Some((_, art)) => art,
+                                // One quick try at the big size only.
+                                None => match get(&quick, &t.art_url).ok().and_then(|b| decode_art(&b)).map(Arc::new) {
+                                    Some(art) => {
+                                        *art_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((t.art_url.clone(), Some(art.clone())));
+                                        Some(art)
+                                    }
+                                    None if !t.art_url.is_empty() => {
+                                        slow_art = Some(t.art_url.clone());
+                                        None
+                                    }
+                                    None => None,
+                                },
                             };
                             t
                         });
@@ -334,9 +358,25 @@ pub fn spawn(cfg: Config, stop: Arc<AtomicBool>, send: impl Fn(Update) -> bool +
                             }
                             t
                         });
+                        crate::draw::trace(format_args!("cover ready ({} ms after the poll started)", asked.elapsed().as_millis()));
                         let sent = track.clone();
+                        *showing.lock().unwrap_or_else(|e| e.into_inner()) = sent.as_ref().map(|t| (t.title.clone(), t.art_url.clone()));
                         if !send(Update::Track(track)) {
                             return;
+                        }
+                        // The cover was slow: fetch it on the side (polling goes
+                        // on) and send it only if that song is still the one shown.
+                        if let (Some(url), Some(t)) = (slow_art, sent.clone()) {
+                            let (agent, send, cache, showing) = (agent.clone(), send.clone(), art_cache.clone(), showing.clone());
+                            thread::spawn(move || {
+                                let art = fetch_art(&agent, &url).map(Arc::new);
+                                crate::draw::trace(format_args!("slow cover ready ({} ms after the poll started)", asked.elapsed().as_millis()));
+                                *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((url.clone(), art.clone()));
+                                let still = showing.lock().is_ok_and(|s| *s == Some((t.title.clone(), url.clone())));
+                                if let (Some(art), true) = (art, still) {
+                                    send(Update::Track(Some(Track { art: Some(art), ..t })));
+                                }
+                            });
                         }
                         // After sending, so the track shows at once: its length (for
                         // timing the next polls) and your play counts (a follow-up).
@@ -375,7 +415,9 @@ pub fn spawn(cfg: Config, stop: Arc<AtomicBool>, send: impl Fn(Update) -> bool +
             } else {
                 (cfg.poll * 2u32.saturating_pow(failures.min(5))).min(Duration::from_secs(60))
             };
-            let until = std::time::Instant::now() + wait;
+            // Counted from when this poll started: the request's own time
+            // (~0.25 s) is part of the interval, not added on top.
+            let until = asked + wait;
             while std::time::Instant::now() < until {
                 if stop.load(Ordering::Relaxed) {
                     return;

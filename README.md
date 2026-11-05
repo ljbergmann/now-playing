@@ -54,12 +54,17 @@ of Ariana Grande". Tracks without cover art get generated art.
 Connected to [VinylVault](https://vinylvault.sky-lab.de), the vinyl look draws the
 record as **the pressing you own** whenever an album from your shelf plays:
 marbled, splatter, swirl, galaxy, picture disc, half & half, clear, glow or solid
-colour, with a "YOUR PRESSING · RED MARBLED · LTD. 500" line. Albums you own on
-plain black stay black. The shelf refreshes every 15 minutes; matching ignores
-"(Deluxe Edition)", " - Single" and featured artists.
+colour. Albums you own on plain black stay black. The shelf refreshes every 15
+minutes; matching ignores "(Deluxe Edition)", " - Single" and featured artists.
+
+**"You own this on vinyl · put it on?"** While an album from your shelf streams,
+every look shows this nudge to play the record instead, in the vinyl look with
+the pressing below it ("OPAL GIRLY · LIMITED"). Only your shelf counts, never the
+catalogue. Turn it off in the settings or with `OWNED_HINT=off`.
 
 Albums you don't own get a real pressing of that album from the public VinylVault
-catalogue ("ON VINYL · MOONSTONE BLUE MARBLED"), the same one every time.
+catalogue ("ON VINYL · MOONSTONE BLUE MARBLED"), the same one every time. Names
+are cleaned of packaging details ("Gatefold", "Alternative Cover 4", …).
 
 ## Screens
 
@@ -132,7 +137,7 @@ options in `/etc/now-playing/env` and `sudo systemctl restart now-playing`.
 | `PROMO` | `on` (default) or `off`: the small VinylVault mark on the clock screen |
 | `ROTATE` | `auto` (default), `0`, `90`, `180`, `270` (clockwise) |
 | `CONNECTOR` | e.g. `HDMI-A-1`, `DSI-1` (default: first connected screen) |
-| `POLL_SECS` | seconds between Last.fm checks (default 2; every second near a track's end) |
+| `POLL_SECS` | seconds between Last.fm checks (default 1) |
 | `SETUP_PORT` | port of the setup page (default 8737) |
 
 **Check first:** play a song in Tidal and look at your Last.fm profile. If it
@@ -141,13 +146,15 @@ shows "Scrobbling now" right away, the display follows within a few seconds.
 ## How it works
 
 ```
-Last.fm ──every 2 s──▶ poller thread ──▶ compose thread ──▶ 60 fps loop ──▶ screen
+Last.fm ──every 1 s──▶ poller thread ──▶ compose thread ──▶ 60 fps loop ──▶ screen
                        (+ cover art,      (renders a full     (crossfade,     (DRM/KMS,
                         play counts)       static frame)       spinning record) 2 buffers)
 ```
 
 New screens are rendered on background threads (all cores but one); the 60 fps
-loop only blends finished frames and redraws what moves.
+loop only blends finished frames and redraws what moves. A new song never waits
+for slow things: a cover that takes longer than 0.6 s and the catalogue pressing
+are fetched on the side and fade in when they arrive.
 
 | Source file | What it does |
 |---|---|
@@ -190,4 +197,6 @@ curl -X POST localhost:9911/revoke             # simulate "disconnected in Vinyl
 ```
 
 `--snapshot out.png [--idle] [--setup]` renders one frame to a file, `--bench`
-times the per-frame work, `NP_PROFILE=1` prints rendering stage times.
+times the per-frame work, `NP_PROFILE=1` prints rendering stage times, and
+`NP_TRACE=1` timestamps each step of a song change (Last.fm answer, cover,
+pressing, on screen) to see where time goes.
