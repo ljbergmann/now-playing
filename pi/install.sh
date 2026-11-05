@@ -33,12 +33,15 @@ echo "==> Installing $(basename "$BIN") to /usr/local/bin/now-playing"
 sudo install -m 755 "$BIN" /usr/local/bin/now-playing
 
 echo "==> Saving Last.fm settings"
-sudo install -d -m 755 /etc/now-playing
+# Create the file locked down *before* the key goes in (no readable window).
+sudo install -d -m 700 /etc/now-playing
+sudo install -m 600 /dev/null /etc/now-playing/env
 sudo tee /etc/now-playing/env >/dev/null <<EOF
 LASTFM_USER=$LASTFM_USER
 LASTFM_API_KEY=$LASTFM_API_KEY
+${ROTATE:+ROTATE=$ROTATE}
+${CONNECTOR:+CONNECTOR=$CONNECTOR}
 EOF
-sudo chmod 600 /etc/now-playing/env
 
 echo "==> Installing the service"
 sudo tee /etc/systemd/system/now-playing.service >/dev/null <<EOF

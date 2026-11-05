@@ -8,7 +8,8 @@ Works with anything that scrobbles to Last.fm (e.g. Tidal on any device).
   only changed pixels are copied each frame, crossfades between tracks
 - Large cover art, blurred cover as background, animated "now playing" bars,
   "last played · 14 min ago" when nothing is playing
-- Adapts to any screen size, landscape or portrait
+- Adapts to the attached screen: any resolution, landscape/portrait/square,
+  hot-plugging, automatic or configurable rotation
 
 ## How it works
 
@@ -57,6 +58,32 @@ ssh <user>@<pi-name>.local 'bash now-playing/pi/install.sh <lastfm-username> <la
 ```
 
 On the Pi: `systemctl status now-playing`, live log `journalctl -u now-playing -f`.
+
+Or download `now-playing-<version>.tar.gz` from the
+[releases](https://github.com/ljbergmann/now-playing/releases), copy it to the Pi,
+and run `tar xzf now-playing-*.tar.gz && bash now-playing/pi/install.sh <user> <key>`.
+
+## Screens
+
+Any screen works (HDMI or DSI, any size, touch not needed). It adapts by itself:
+
+- **Resolution:** uses the screen's preferred mode; layout and text scale to fit.
+  Wide screens get cover and text side by side, portrait and square screens
+  get them stacked.
+- **Plug and play:** starts without a screen and waits for one; notices when the
+  screen is unplugged or swapped (within ~2 s) and redraws at the new size.
+- **Rotation:** panels that report how they're mounted are rotated automatically.
+  For a screen mounted sideways or upside down, set `ROTATE`.
+- **Two screens connected:** uses the first connected one; pick with `CONNECTOR`.
+  The log shows the names (`journalctl -u now-playing`).
+
+Set these at install time, e.g. `ROTATE=90 CONNECTOR=DSI-1 bash now-playing/pi/install.sh …`,
+or edit `/etc/now-playing/env` and `sudo systemctl restart now-playing`:
+
+| Setting | Values |
+|---|---|
+| `ROTATE` | `0`, `90`, `180`, `270` (clockwise), or `auto` (default) |
+| `CONNECTOR` | e.g. `HDMI-A-1`, `DSI-1` (default: first connected screen) |
 
 **Check first:** play a song in Tidal and look at your Last.fm profile. If it
 shows "Scrobbling now" right away, the display follows track changes within a

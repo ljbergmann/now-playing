@@ -2,7 +2,7 @@
 //! and only sends a `Track` when something actually changed.
 
 use std::io::Read;
-use std::sync::mpsc::Sender;
+
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -146,14 +146,53 @@ fn parse(body: &str) -> Result<Option<Track>, String> {
     }))
 }
 
+/// Errors never include the URL: it contains the API key, and these messages
+/// end up in the system log and on screen.
 fn get(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
-    let resp = agent.get(url).call().map_err(|e| e.to_string())?;
+    let resp = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, resp)) => {
+            // Last.fm explains API errors (bad key, unknown user) in the body.
+            let msg = resp
+                .into_string()
+                .ok()
+                .and_then(|b| serde_json::from_str::<Resp>(&b).ok())
+                .and_then(|r| r.message);
+            return Err(match msg {
+                Some(m) => format!("Last.fm: {m} (HTTP {code})"),
+                None => format!("HTTP {code}"),
+            });
+        }
+        Err(ureq::Error::Transport(t)) => {
+            return Err(match t.message() {
+                Some(m) => format!("network error: {} ({m})", t.kind()),
+                None => format!("network error: {}", t.kind()),
+            });
+        }
+    };
     let mut buf = Vec::new();
     resp.into_reader()
         .take(20 * 1024 * 1024)
         .read_to_end(&mut buf)
         .map_err(|e| e.to_string())?;
     Ok(buf)
+}
+
+/// Decodes cover art with hard limits, so a huge or oddly shaped image
+/// can't eat the Pi's memory. Real covers are square and ≤ 1200 px.
+fn decode_art(bytes: &[u8]) -> Option<RgbaImage> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(96 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
+    let (w, h) = (img.width(), img.height());
+    if w < 16 || h < 16 || w.max(h) > 4 * w.min(h) {
+        return None;
+    }
+    Some(img.to_rgba8())
 }
 
 fn fetch_art(agent: &ureq::Agent, url: &str) -> Option<RgbaImage> {
@@ -163,10 +202,8 @@ fn fetch_art(agent: &ureq::Agent, url: &str) -> Option<RgbaImage> {
     // Fall back to the standard 300px size if the big one isn't available.
     let fallback = url.replace("/770x0/", "/300x300/");
     for u in [url, fallback.as_str()] {
-        if let Ok(bytes) = get(agent, u) {
-            if let Ok(img) = image::load_from_memory(&bytes) {
-                return Some(img.to_rgba8());
-            }
+        if let Some(img) = get(agent, u).ok().and_then(|b| decode_art(&b)) {
+            return Some(img);
         }
         if u == fallback {
             break;
@@ -175,7 +212,7 @@ fn fetch_art(agent: &ureq::Agent, url: &str) -> Option<RgbaImage> {
     None
 }
 
-pub fn spawn(cfg: Config, tx: Sender<Update>) {
+pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
     thread::spawn(move || {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(10))
@@ -215,7 +252,7 @@ pub fn spawn(cfg: Config, tx: Sender<Update>) {
                             };
                             t
                         });
-                        if tx.send(Update::Track(track)).is_err() {
+                        if !send(Update::Track(track)) {
                             return;
                         }
                     }
@@ -225,7 +262,7 @@ pub fn spawn(cfg: Config, tx: Sender<Update>) {
                     if failures == 1 || failures % 20 == 0 {
                         eprintln!("Last.fm poll failed: {e}");
                     }
-                    if tx.send(Update::Error(e)).is_err() {
+                    if !send(Update::Error(e)) {
                         return;
                     }
                 }

@@ -86,7 +86,9 @@ fn track(pm: &mut Pixmap, fonts: &Fonts, t: &Track, now: SystemTime) -> Option<E
     let (w, h) = (pm.width() as f32, pm.height() as f32);
     let vmin = w.min(h) / 100.0;
     let pad = clamp(16.0, 4.0 * vmin, 48.0);
-    let portrait = h > w;
+    // Stacked layout (cover above text) for portrait and square-ish screens;
+    // side by side only when there is real width to spare.
+    let portrait = w < h * 1.2;
 
     // Background: blur the cover at 48px (cheap), then stretch it up. Blurring
     // before upscaling keeps it smooth; plain upscaling alone shows blocky blobs.
@@ -231,12 +233,12 @@ fn draw_cover(pm: &mut Pixmap, t: &Track, (x, y, size): (f32, f32, f32), vmin: f
     let px = size.round() as u32;
     match t.art.as_deref() {
         Some(art) if px > 0 => {
-            // Pre-scale with a good filter, then draw 1:1 (no sampling artefacts).
+            // Crop the centre square in source pixels first, then scale exactly
+            // to the cover size with a good filter and draw 1:1.
             let (aw, ah) = art.dimensions();
-            let scale = (px as f32 / aw as f32).max(px as f32 / ah as f32);
-            let (sw, sh) = ((aw as f32 * scale).ceil() as u32, (ah as f32 * scale).ceil() as u32);
-            let scaled = imageops::resize(art, sw.max(px), sh.max(px), imageops::FilterType::CatmullRom);
-            let cropped = imageops::crop_imm(&scaled, (sw.max(px) - px) / 2, (sh.max(px) - px) / 2, px, px).to_image();
+            let side = aw.min(ah);
+            let square = imageops::crop_imm(art, (aw - side) / 2, (ah - side) / 2, side, side).to_image();
+            let cropped = imageops::resize(&square, px, px, imageops::FilterType::CatmullRom);
             if let Some(cp) = to_pixmap(&cropped) {
                 let shader = tiny_skia::Pattern::new(
                     cp.as_ref(),
