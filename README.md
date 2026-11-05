@@ -1,10 +1,12 @@
 # now-playing
 
-A full-screen "now playing" display for a Raspberry Pi (or a Mac window), fed by
-Last.fm. Works with anything that scrobbles to Last.fm, e.g. Tidal on any device.
+A "now playing" display fed by Last.fm, for whatever hardware and screen you
+have: a Raspberry Pi with any monitor, or an app on Mac, Windows and Linux (in a
+window or fullscreen on any monitor). Works with anything that scrobbles to
+Last.fm, e.g. Tidal on any device.
 
-- **Set up from your phone:** scan the QR code on the screen, tap "Connect with
-  Last.fm", done. No API key, no SSH, no config files.
+- **Easy setup:** on a Pi, scan the QR code on the screen with your phone; on a
+  computer, the app's own settings window. No API key, no config files.
 - **Three looks** for next to a record player, with a big clock when nothing plays.
 - **Your own pressings:** with VinylVault, the record on screen is the coloured
   vinyl you actually own.
@@ -13,7 +15,13 @@ Last.fm. Works with anything that scrobbles to Last.fm, e.g. Tidal on any device
 
 ## Setup
 
-1. Install it (see [Install on the Pi](#install-on-the-pi), or the [Mac app](#mac-app)).
+**On a computer** (see [Desktop app](#desktop-app)): the settings window opens
+on first start. Type your Last.fm user name, optionally **Connect with
+VinylVault** (the system's sign-in sheet), pick a look. No browser involved.
+
+**On a Pi:**
+
+1. Install it (see [Install on the Pi](#install-on-the-pi)).
 2. The screen shows a QR code. Scan it with your phone. A small page opens,
    served by the display itself on your home network.
 3. **Last.fm:** tap **Connect with Last.fm** and **Allow** (or type your user name).
@@ -23,8 +31,8 @@ Last.fm. Works with anything that scrobbles to Last.fm, e.g. Tidal on any device
    changes as you tap. Then **Done**.
 
 The page only works with the random code in the QR address and closes after
-"Done" or 20 idle minutes. Open it again later: press `S` in the Mac app, or on
-the Pi run `sudo systemctl kill -s USR1 now-playing`.
+"Done" or 20 idle minutes. Open it again later with
+`sudo systemctl kill -s USR1 now-playing`.
 
 The display stores only your Last.fm user name (no Last.fm login pass) and, if
 connected, a read-only VinylVault pass that works for nothing but your shelf.
@@ -88,23 +96,31 @@ tar xzf now-playing-*.tar.gz && bash now-playing/pi/install.sh && sudo reboot
 
 Status: `systemctl status now-playing`, live log: `journalctl -u now-playing -f`.
 
-## Mac app
+## Desktop app
 
-Download `Now-Playing-mac-<version>.zip` from the releases (Apple Silicon), or
-build it with `./mac/bundle.sh`. On first start the setup page opens in your
-browser. Keys: `1` `2` `3` look, `I` preview the clock screen, `S` setup, `Esc` quit.
+| System | Download | Settings |
+|---|---|---|
+| macOS (Apple Silicon) | `Now-Playing-mac-<version>.zip` | native window (⌘,) |
+| Windows 10/11 (64-bit) | `now-playing-windows-<version>.zip` (keep the DLL next to the exe) | native window (`S`, right-click menu) |
+| Linux with a desktop (x86_64) | `now-playing-linux` | the setup page in the browser (`S`) |
 
-It isn't notarized: the first time, right-click it → Open. Without Inter
-installed it uses the system font. Known quirk: while a menu is open, macOS
-pauses the animation.
+Run it in a window or fullscreen on any monitor: **Fullscreen** and **Screen**
+in the menu (menu bar on the Mac, right-click in the window), or double-click /
+`F`; `Esc` leaves fullscreen. Keys: `1` `2` `3` look, `I` preview the clock
+screen, `S` settings. The chosen look, screen and fullscreen are remembered.
+
+The apps aren't signed by Apple/Microsoft: on the Mac right-click → Open the
+first time; on Windows click "More info → Run anyway". The Windows and Linux
+apps haven't been tested on real machines yet.
 
 ## Settings
 
-The setup page covers the usual ones. Everything is stored in a settings file
-(`/var/lib/now-playing/settings` on the Pi, `~/Library/Application
-Support/Now Playing/settings` on a Mac). Values in the environment win over the
-file; on the Pi, put fixed screen options in `/etc/now-playing/env` and
-`sudo systemctl restart now-playing`.
+The settings window / setup page covers the usual ones. Everything is stored in
+a settings file: `/var/lib/now-playing/settings` on the Pi,
+`~/Library/Application Support/Now Playing/settings` on a Mac,
+`%APPDATA%\Now Playing\settings` on Windows, `~/.config/now-playing/settings` on
+Linux. Values in the environment win over the file; on the Pi, put fixed screen
+options in `/etc/now-playing/env` and `sudo systemctl restart now-playing`.
 
 | Setting | Values |
 |---|---|
@@ -142,14 +158,15 @@ loop only blends finished frames and redraws what moves.
 | `src/themes/` | The looks (`vinyl.rs`, `poster.rs`, `ambient.rs`) and vinyl finishes (`pressing.rs`) |
 | `src/draw.rs` | Shared drawing: text, shapes, cover scaling, palette, clock |
 | `src/frame.rs` | Per-frame work: crossfade, colour drift, spinning record, equalizer |
-| `src/display/` | Pi output without a desktop (`kms.rs`, DRM/KMS) and the window for Mac, Windows and desktop Linux (`desktop.rs`) |
+| `src/display/` | Pi output without a desktop (`kms.rs`, DRM/KMS), the window for Mac, Windows and desktop Linux (`desktop.rs`), native settings (`settings_mac.rs`, `settings_win.rs`, shared logic in `settings_ui.rs`) |
 | `src/fonts.rs` | Inter, built in (`assets/fonts`, SIL Open Font License) |
 
 ## Building
 
 ```bash
-./pi/build.sh     # both Pi binaries (Docker) → dist/
-./mac/bundle.sh   # Mac app with icon → dist/Now Playing.app
+./pi/build.sh        # Pi 2, Pi 3 and desktop Linux (Docker) → dist/
+./mac/bundle.sh      # Mac app with icon → dist/Now Playing.app
+./windows/build.sh   # Windows app (MinGW-w64: brew install mingw-w64) → dist/now-playing-windows/
 ```
 
 Release builds carry the app's own Last.fm key and secret, read from

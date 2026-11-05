@@ -33,6 +33,7 @@ static QUIT: AtomicBool = AtomicBool::new(false);
 pub fn quit_requested() -> bool {
     QUIT.load(Ordering::Relaxed)
 }
+#[cfg(unix)]
 extern "C" fn on_signal(_: libc::c_int) {
     QUIT.store(true, Ordering::Relaxed);
 }
@@ -128,7 +129,7 @@ impl Player {
     /// Starts "Connect with VinylVault" for the desktop's sign-in sheet: the
     /// VinylVault address to open; the answer comes back to the (quietly
     /// started) local setup server.
-    #[cfg_attr(not(all(feature = "desktop", target_os = "macos")), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "desktop", any(target_os = "macos", target_os = "windows"))), allow(dead_code))]
     pub fn vinylvault_connect_url(&self) -> Option<String> {
         start_setup(&self.msg_tx).ok()?;
         setup::vinylvault_start(&setup::local_url()?)
@@ -353,7 +354,7 @@ fn run() -> Result<(), String> {
     let needs_setup = lastfm_config().is_none() || args.setup;
     // The Mac opens its own settings window instead; elsewhere: the setup
     // page (QR code on the display, and in the browser on a desktop).
-    let native_settings = desktop && cfg!(target_os = "macos");
+    let native_settings = desktop && cfg!(any(target_os = "macos", target_os = "windows"));
     if needs_setup && !native_settings {
         open_setup(&msg_tx, desktop);
     }

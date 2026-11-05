@@ -32,8 +32,10 @@ pub fn run(player: Player, size: (usize, usize), open_settings: bool) -> Result<
         last_click: None,
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         menus: None,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         settings_win: None,
+        #[cfg(target_os = "windows")]
+        sign_in: None,
         refreshed: Instant::now(),
         open_settings,
         error: None,
@@ -51,13 +53,22 @@ struct App {
     last_click: Option<Instant>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     menus: Option<menus::Menus>,
-    #[cfg(target_os = "macos")]
-    settings_win: Option<super::settings_mac::SettingsWindow>,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    settings_win: Option<NativeSettings>,
+    /// Windows: the VinylVault sign-in window, its web view, and the pass
+    /// that existed before (a new one means: done, close it).
+    #[cfg(target_os = "windows")]
+    sign_in: Option<(wry::WebView, Rc<Window>, Option<String>)>,
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     refreshed: Instant,
     open_settings: bool,
     error: Option<String>,
 }
+
+#[cfg(target_os = "macos")]
+type NativeSettings = super::settings_mac::SettingsWindow;
+#[cfg(target_os = "windows")]
+type NativeSettings = super::settings_win::SettingsWindow;
 
 /// The saved screen (`SCREEN`), else the one the window is on.
 fn pick_monitor(el: &ActiveEventLoop, w: &Window) -> Option<MonitorHandle> {
@@ -89,8 +100,8 @@ impl App {
                 }
             }
             Command::Quit => el.exit(),
-            // The Mac has its own settings window; elsewhere the setup page.
-            #[cfg(target_os = "macos")]
+            // Mac and Windows have native settings windows; Linux uses the setup page.
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             Command::Settings => self.show_settings(),
             other => self.player.command(other),
         }
@@ -100,30 +111,76 @@ impl App {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn show_settings(&mut self) {
-        let Some(mtm) = objc2::MainThreadMarker::new() else { return };
         let user = settings::get("LASTFM_USER");
-        let win = self.settings_win.get_or_insert_with(|| super::settings_mac::SettingsWindow::new(mtm, user.as_deref()));
-        win.refresh(&super::settings_ui::State::current(self.player.theme()));
-        win.show(mtm);
-    }
-
-    /// Clicks in the settings window, and keeping it up to date (a Connect
-    /// finishes in the browser, so the window has to notice by itself).
-    fn settings_tick(&mut self) {
         #[cfg(target_os = "macos")]
         {
+            let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+            let win = self.settings_win.get_or_insert_with(|| NativeSettings::new(mtm, user.as_deref()));
+            win.refresh(&super::settings_ui::State::current(self.player.theme()));
+            win.show(mtm);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if self.settings_win.is_none() {
+                self.settings_win = NativeSettings::new(user.as_deref());
+            }
+            let Some(win) = self.settings_win.as_mut() else { return };
+            win.refresh(&super::settings_ui::State::current(self.player.theme()));
+            win.show();
+        }
+    }
+
+    /// The VinylVault sign-in: macOS's sign-in sheet on the Mac, a small
+    /// in-app window with the system web view (WebView2) on Windows.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn sign_in(&mut self, el: &ActiveEventLoop) {
+        let Some(url) = self.player.vinylvault_connect_url() else { return };
+        #[cfg(target_os = "macos")]
+        {
+            let _ = el;
+            if let (Some(win), Some(mtm)) = (self.settings_win.as_mut(), objc2::MainThreadMarker::new()) {
+                win.sign_in(&url, mtm);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if self.sign_in.is_some() {
+                return;
+            }
+            let attrs = Window::default_attributes().with_title("Sign in to VinylVault").with_inner_size(LogicalSize::new(520.0, 700.0));
+            let Ok(w) = el.create_window(attrs) else { return };
+            let w = Rc::new(w);
+            match wry::WebViewBuilder::new().with_url(&url).build(&*w) {
+                Ok(view) => self.sign_in = Some((view, w, settings::get("VINYLVAULT_TOKEN"))),
+                Err(e) => eprintln!("VinylVault sign-in window: {e}"),
+            }
+        }
+    }
+
+    /// Clicks in the settings window, and keeping it up to date (a sign-in
+    /// finishes on its own, so the window has to notice by itself).
+    fn settings_tick(&mut self, el: &ActiveEventLoop) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            #[cfg(target_os = "macos")]
+            use super::settings_mac::next;
+            #[cfg(target_os = "windows")]
+            use super::settings_win::next;
             let mut changed = super::settings_ui::tick(&self.player);
-            while let Some(a) = super::settings_mac::next() {
+            while let Some(a) = next() {
                 if let super::settings_ui::Action::ConnectVinylVault = a {
-                    let url = self.player.vinylvault_connect_url();
-                    if let (Some(url), Some(win), Some(mtm)) = (url, self.settings_win.as_mut(), objc2::MainThreadMarker::new()) {
-                        win.sign_in(&url, mtm);
-                    }
+                    self.sign_in(el);
                 } else {
                     super::settings_ui::apply(&mut self.player, a);
                 }
+                changed = true;
+            }
+            // Windows: a new pass arrived, the sign-in is done.
+            #[cfg(target_os = "windows")]
+            if self.sign_in.as_ref().is_some_and(|(_, _, before)| settings::get("VINYLVAULT_TOKEN") != *before) {
+                self.sign_in = None;
                 changed = true;
             }
             let Some(win) = self.settings_win.as_mut() else { return };
@@ -137,6 +194,8 @@ impl App {
                 }
             }
         }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = el;
     }
 
     fn key(&mut self, el: &ActiveEventLoop, ev: KeyEvent) {
@@ -226,7 +285,7 @@ impl ApplicationHandler for App {
         if crate::take_setup_request() || std::mem::take(&mut self.open_settings) {
             self.command(el, Command::Settings);
         }
-        self.settings_tick();
+        self.settings_tick(el);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         while let Some(cmd) = menus::next() {
             self.command(el, cmd);
@@ -242,7 +301,18 @@ impl ApplicationHandler for App {
         el.set_control_flow(ControlFlow::WaitUntil(self.next));
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, ev: WindowEvent) {
+        // The Windows sign-in window: only closing matters.
+        #[cfg(target_os = "windows")]
+        if self.sign_in.as_ref().is_some_and(|(_, w, _)| w.id() == id) {
+            if let WindowEvent::CloseRequested = ev {
+                self.sign_in = None;
+            }
+            return;
+        }
+        if self.window.as_ref().is_some_and(|w| w.id() != id) {
+            return;
+        }
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::RedrawRequested => {

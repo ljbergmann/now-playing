@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Builds both Pi binaries inside a Debian (bookworm) container:
-#   dist/now-playing-pi2   32-bit ARMv7, tuned for the Pi 2 (Cortex-A7, NEON)
-#   dist/now-playing-pi3   64-bit ARM,   tuned for the Pi 3 (Cortex-A53)
+# Builds the Linux binaries inside a Debian (bookworm) container:
+#   dist/now-playing-pi2     32-bit ARMv7, tuned for the Pi 2 (Cortex-A7, NEON)
+#   dist/now-playing-pi3     64-bit ARM,   tuned for the Pi 3 (Cortex-A53)
+#   dist/now-playing-linux   64-bit x86 PCs with a desktop (window, X11/Wayland)
 # Needs Docker. On an Apple Silicon Mac the container runs natively (arm64).
-# Without the desktop window: a Pi with OS Lite draws straight to the screen.
+# The Pi builds leave the window out: a Pi with OS Lite draws straight to the screen.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,8 +28,8 @@ docker run --rm \
   -e CARGO_TARGET_DIR=/src/target/pi \
   rust:1-bookworm bash -euo pipefail -c '
     apt-get update -qq
-    apt-get install -y -qq gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu >/dev/null
-    rustup target add armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu >/dev/null
+    apt-get install -y -qq gcc-arm-linux-gnueabihf gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu >/dev/null
+    rustup target add armv7-unknown-linux-gnueabihf aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu >/dev/null
 
     export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
     export CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc
@@ -39,9 +40,14 @@ docker run --rm \
     export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=cortex-a53"
     cargo build --release --locked --no-default-features --target aarch64-unknown-linux-gnu
+
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
+    export CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc
+    cargo build --release --locked --target x86_64-unknown-linux-gnu
   '
 
 mkdir -p dist
 cp target/pi/armv7-unknown-linux-gnueabihf/release/now-playing dist/now-playing-pi2
 cp target/pi/aarch64-unknown-linux-gnu/release/now-playing dist/now-playing-pi3
+cp target/pi/x86_64-unknown-linux-gnu/release/now-playing dist/now-playing-linux
 ls -lh dist/

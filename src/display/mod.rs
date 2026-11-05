@@ -51,6 +51,8 @@ pub fn open(opts: &Options) -> Result<Box<dyn Display>, String> {
 mod desktop;
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 mod settings_mac;
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+mod settings_win;
 #[cfg(feature = "desktop")]
 mod settings_ui;
 #[cfg(feature = "desktop")]

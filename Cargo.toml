@@ -24,7 +24,7 @@ getrandom = "0.3"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:winit", "dep:softbuffer", "dep:muda", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:objc2-authentication-services", "dep:block2"]
+desktop = ["dep:winit", "dep:softbuffer", "dep:muda", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:objc2-authentication-services", "dep:block2", "dep:windows-sys", "dep:wry"]
 
 # Menus (menu bar on the Mac, right-click menu on Windows). Not on Linux:
 # there muda needs GTK; the Linux window uses keys instead.
@@ -38,6 +38,19 @@ objc2-foundation = { version = "0.3", optional = true }
 objc2-app-kit = { version = "0.3", optional = true }
 objc2-authentication-services = { version = "0.3", optional = true }
 block2 = { version = "0.6", optional = true }
+
+# The native settings window on Windows (Win32), and its VinylVault sign-in
+# window (WebView2, preinstalled on Windows 10/11).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+wry = { version = "0.57", optional = true, default-features = false, features = ["os-webview"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 drm = "0.15.0"
