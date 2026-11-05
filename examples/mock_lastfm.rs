@@ -6,6 +6,10 @@
 //! MOCK_ARTIST / MOCK_ALBUM / MOCK_TITLE override the "playing" track (e.g. to
 //! try the VinylVault catalogue fallback with a real album).
 //!
+//! track.getInfo / artist.getInfo answer with your play counts, per scenario:
+//! playing = loved, 37 plays, 1,203 of the artist; long = not loved, never
+//! played, 12,345 of the artist; noart = unknown (no line at all).
+//!
 //! Also a fake VinylVault shelf that owns the test album:
 //!   VINYLVAULT_SHELF=http://localhost:9911/shelf/test
 //!   curl -X POST localhost:9911/finish/<solid|marbled|splatter|swirl|galaxy|picture_disc|half_and_half|clear|glow>
@@ -88,6 +92,19 @@ fn main() {
             let hue = if url.contains("b.png") { 20.0 } else { 280.0 };
             let png = Header::from_bytes("Content-Type", "image/png").unwrap();
             let _ = req.respond(Response::from_data(art(hue)).with_header(png));
+            continue;
+        }
+        if url.contains("method=track.getInfo") || url.contains("method=artist.getInfo") {
+            let track = url.contains("method=track.getInfo");
+            let body = match (mode.as_str(), track) {
+                ("noart", _) => r#"{"error":6,"message":"Track not found"}"#.to_string(),
+                ("long", true) => r#"{"track":{"name":"x","duration":"0","userplaycount":"0","userloved":"0"}}"#.to_string(),
+                ("long", false) => r#"{"artist":{"name":"x","stats":{"listeners":"10","playcount":"99999","userplaycount":"12345"}}}"#.to_string(),
+                (_, true) => r#"{"track":{"name":"x","duration":"0","userplaycount":"37","userloved":"1"}}"#.to_string(),
+                (_, false) => r#"{"artist":{"name":"x","stats":{"listeners":"10","playcount":"99999","userplaycount":"1203"}}}"#.to_string(),
+            };
+            let json = Header::from_bytes("Content-Type", "application/json").unwrap();
+            let _ = req.respond(Response::from_string(body).with_header(json));
             continue;
         }
         let base = "http://localhost:9911/i/u/300x300/";

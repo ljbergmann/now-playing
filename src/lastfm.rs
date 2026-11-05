@@ -22,6 +22,65 @@ pub struct Track {
     pub playing: bool,
     /// When it was scrobbled (only set when not playing).
     pub played_at: Option<SystemTime>,
+    /// Your play counts for it; arrives a moment after the track itself.
+    pub stats: Option<Stats>,
+}
+
+/// Your Last.fm numbers for the playing track.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stats {
+    pub loved: bool,
+    /// Your scrobbles of this track so far (the playing one isn't counted yet).
+    pub track_plays: Option<u64>,
+    /// Your scrobbles of this artist so far.
+    pub artist_plays: Option<u64>,
+}
+
+impl Stats {
+    /// One quiet line, e.g. "♥ · 38th play · 1,204 plays of Ariana Grande".
+    /// Parts that aren't known are left out; `None` when nothing is.
+    pub fn line(&self, artist: &str) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.loved {
+            parts.push(HEART.to_string());
+        }
+        if let Some(n) = self.track_plays {
+            parts.push(if n == 0 { "first play".into() } else { format!("{} play", ordinal(n + 1)) });
+        }
+        // No artist count before the first play of them: "first play" says it.
+        if let Some(n) = self.artist_plays.filter(|&n| n > 0) {
+            let plays = if n == 1 { "play" } else { "plays" };
+            parts.push(if artist.is_empty() { format!("{} {plays}", thousands(n)) } else { format!("{} {plays} of {artist}", thousands(n)) });
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+}
+
+pub const HEART: char = '♥';
+
+/// 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, 112th, ...
+fn ordinal(n: u64) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{}{suffix}", thousands(n))
+}
+
+/// 1204 → "1,204".
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 
@@ -137,6 +196,7 @@ fn parse(body: &str) -> Result<Option<Track>, String> {
         art: None,
         playing,
         played_at,
+        stats: None,
     }))
 }
 
@@ -225,6 +285,7 @@ pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
         let mut current: Option<(String, String)> = None;
         let mut since = std::time::Instant::now();
         let mut duration: Option<Duration> = None;
+        let mut stats: Option<Stats> = None;
 
         loop {
             let result = get(&agent, &url)
@@ -251,14 +312,34 @@ pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
                             t
                         });
                         let playing = track.as_ref().filter(|t| t.playing).map(|t| (t.artist.clone(), t.title.clone()));
+                        // Same song, something else changed: keep its stats.
+                        let track = track.map(|mut t| {
+                            if playing.is_some() && playing == current {
+                                t.stats = stats.clone();
+                            }
+                            t
+                        });
+                        let sent = track.clone();
                         if !send(Update::Track(track)) {
                             return;
                         }
-                        // After sending: the length is only for timing the next polls.
+                        // After sending, so the track shows at once: its length (for
+                        // timing the next polls) and your play counts (a follow-up).
                         if playing != current {
                             since = std::time::Instant::now();
-                            duration = playing.as_ref().and_then(|(a, t)| fetch_duration(&agent, &cfg, a, t));
+                            let info = playing.as_ref().and_then(|(a, t)| track_info(&agent, &cfg, a, t));
+                            duration = info.as_ref().and_then(duration_of);
+                            stats = playing.as_ref().and_then(|(a, _)| {
+                                let s = Stats { artist_plays: artist_plays(&agent, &cfg, a), ..info.as_ref().map(track_stats).unwrap_or_default() };
+                                (s != Stats::default()).then_some(s)
+                            });
                             current = playing;
+                            if let (Some(s), Some(mut t)) = (&stats, sent) {
+                                t.stats = Some(s.clone());
+                                if !send(Update::Track(Some(t))) {
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
@@ -284,23 +365,54 @@ pub fn spawn(cfg: Config, send: impl Fn(Update) -> bool + Send + 'static) {
     });
 }
 
-/// Track length in Last.fm's catalogue (often missing, then `None`).
-fn fetch_duration(agent: &ureq::Agent, cfg: &Config, artist: &str, title: &str) -> Option<Duration> {
+/// `track.getInfo` for the playing track, with your play count and loved
+/// flag (`username`). Also gives its length, for timing the polls.
+fn track_info(agent: &ureq::Agent, cfg: &Config, artist: &str, title: &str) -> Option<serde_json::Value> {
     let url = format!(
-        "{}?method=track.getInfo&artist={}&track={}&api_key={}&format=json",
+        "{}?method=track.getInfo&artist={}&track={}&username={}&api_key={}&format=json",
         cfg.api_url,
         encode(artist),
         encode(title),
+        encode(&cfg.user),
+        encode(&cfg.api_key)
+    );
+    let body = get(agent, &url).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+/// Your scrobbles of an artist (`artist.getInfo` with `username`).
+fn artist_plays(agent: &ureq::Agent, cfg: &Config, artist: &str) -> Option<u64> {
+    let url = format!(
+        "{}?method=artist.getInfo&artist={}&username={}&api_key={}&format=json",
+        cfg.api_url,
+        encode(artist),
+        encode(&cfg.user),
         encode(&cfg.api_key)
     );
     let body = get(agent, &url).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
-    let ms = match &v["track"]["duration"] {
-        serde_json::Value::String(s) => s.parse::<u64>().ok()?,
-        serde_json::Value::Number(n) => n.as_u64()?,
-        _ => return None,
-    };
+    count(&v["artist"]["stats"]["userplaycount"])
+}
+
+/// Last.fm sends numbers as strings ("37"), sometimes as numbers.
+fn count(v: &serde_json::Value) -> Option<u64> {
+    match v {
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        serde_json::Value::Number(n) => n.as_u64(),
+        _ => None,
+    }
+}
+
+/// Track length in Last.fm's catalogue (often missing, then `None`).
+fn duration_of(v: &serde_json::Value) -> Option<Duration> {
+    let ms = count(&v["track"]["duration"])?;
     (ms >= 20_000 && ms <= 3 * 3_600_000).then(|| Duration::from_millis(ms))
+}
+
+/// Your play count and loved flag from a `track.getInfo` answer.
+fn track_stats(v: &serde_json::Value) -> Stats {
+    let t = &v["track"];
+    Stats { loved: count(&t["userloved"]) == Some(1), track_plays: count(&t["userplaycount"]), artist_plays: None }
 }
 
 /// How long to wait before asking Last.fm again.
@@ -370,6 +482,43 @@ mod tests {
         assert_eq!(next_wait(base, s(215), len), s(1)); // a bit late: still fast
         assert_eq!(next_wait(base, s(240), len), base); // paused: back to normal
         assert_eq!(next_wait(s(5), s(190), len), s(4)); // never sleeps into the window
+    }
+
+    #[test]
+    fn parses_track_and_artist_stats() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"track":{"name":"S","duration":"215000","userplaycount":"37","userloved":"1"}}"#).unwrap();
+        assert_eq!(track_stats(&v), Stats { loved: true, track_plays: Some(37), artist_plays: None });
+        assert_eq!(duration_of(&v), Some(Duration::from_millis(215_000)));
+        let v: serde_json::Value = serde_json::from_str(r#"{"track":{"name":"S","userplaycount":0,"userloved":"0"}}"#).unwrap();
+        assert_eq!(track_stats(&v), Stats { loved: false, track_plays: Some(0), artist_plays: None });
+        // No username in the answer (or an error): nothing known.
+        let v: serde_json::Value = serde_json::from_str(r#"{"error":6,"message":"Track not found"}"#).unwrap();
+        assert_eq!(track_stats(&v), Stats::default());
+        let v: serde_json::Value = serde_json::from_str(r#"{"artist":{"name":"A","stats":{"listeners":"9","playcount":"99","userplaycount":"1204"}}}"#).unwrap();
+        assert_eq!(count(&v["artist"]["stats"]["userplaycount"]), Some(1204));
+    }
+
+    #[test]
+    fn ordinals_and_separators() {
+        let got: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111, 112, 1001].into_iter().map(ordinal).collect();
+        assert_eq!(got, ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd", "101st", "111th", "112th", "1,001st"]);
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1204), "1,204");
+        assert_eq!(thousands(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn stats_line() {
+        let s = |loved, t, a| Stats { loved, track_plays: t, artist_plays: a };
+        assert_eq!(s(true, Some(37), Some(1204)).line("Ariana Grande").as_deref(), Some("♥ · 38th play · 1,204 plays of Ariana Grande"));
+        assert_eq!(s(false, Some(0), Some(0)).line("X").as_deref(), Some("first play"));
+        assert_eq!(s(false, Some(0), Some(5)).line("X").as_deref(), Some("first play · 5 plays of X"));
+        assert_eq!(s(false, Some(1), Some(1)).line("X").as_deref(), Some("2nd play · 1 play of X"));
+        assert_eq!(s(true, None, None).line("X").as_deref(), Some("♥"));
+        assert_eq!(s(false, None, Some(2000)).line("X").as_deref(), Some("2,000 plays of X"));
+        assert_eq!(s(false, None, Some(3)).line("").as_deref(), Some("3 plays"));
+        assert_eq!(s(false, None, None).line("X"), None);
     }
 
     #[test]

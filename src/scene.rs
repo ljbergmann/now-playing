@@ -227,11 +227,13 @@ pub struct Item<'f> {
     pub gap: f32,
     /// Put the animated equalizer bars in front of this line.
     pub eq: bool,
+    /// Draw a small heart in front of this line (for fonts without ♥).
+    pub heart: bool,
 }
 
 impl<'f> Item<'f> {
     pub fn new(font: &'f FontVec, px: f32, text: impl Into<String>, color: Rgba) -> Self {
-        Item { font, px, text: text.into(), color, tracking: 0.0, gap: 0.0, eq: false }
+        Item { font, px, text: text.into(), color, tracking: 0.0, gap: 0.0, eq: false, heart: false }
     }
     pub fn track(mut self, em: f32) -> Self {
         self.tracking = em;
@@ -260,11 +262,16 @@ pub fn draw_stack(pm: &mut Pixmap, items: &[Item], (x, width): (f32, f32), top: 
         y += it.gap;
         let tracking = it.tracking * it.px;
         let (bar, gap) = ((0.22 * it.px).round().max(2.0), (0.18 * it.px).round().max(1.0));
-        let eq_w = if it.eq { bar * 3.0 + gap * 2.0 + 0.6 * it.px } else { 0.0 };
+        let eq_w = if it.eq { bar * 3.0 + gap * 2.0 + 0.6 * it.px } else if it.heart { heart_w(it.px) } else { 0.0 };
         let text = draw::ellipsize(it.font, it.px, &it.text, width - eq_w, tracking);
         let tw = draw::text_width(it.font, it.px, &text, tracking) + eq_w;
         let tx = if align == Align::Center { x + (width - tw) / 2.0 } else { x };
         draw::draw_text(pm, it.font, it.px, tx + eq_w, y, &text, it.color, tracking);
+        if it.heart {
+            let ascent = it.font.as_scaled(PxScale::from(it.px)).ascent();
+            let baseline = y + ascent + (it.px * 1.2 - (ascent - it.font.as_scaled(PxScale::from(it.px)).descent())) / 2.0;
+            draw_heart(pm, tx, baseline, it.px, it.color);
+        }
         if it.eq {
             let eq_h = (it.px * 0.9).round();
             let ascent = it.font.as_scaled(PxScale::from(it.px)).ascent();
@@ -287,4 +294,43 @@ pub fn draw_stack(pm: &mut Pixmap, items: &[Item], (x, width): (f32, f32), top: 
 pub fn size_to_width(font: &FontVec, sample: &str, width: f32, max_px: f32, tracking_em: f32) -> f32 {
     let at100 = draw::text_width(font, 100.0, sample, tracking_em * 100.0).max(1.0);
     (100.0 * width / at100).min(max_px)
+}
+
+/// The quiet play-count line under the playing track, if Last.fm told us any.
+pub fn stats_item<'f>(font: &'f FontVec, px: f32, track: &crate::lastfm::Track, color: Rgba) -> Option<Item<'f>> {
+    let line = track.stats.as_ref()?.line(&track.artist)?;
+    // Inter and San Francisco have ♥; other fallback fonts may not: draw one.
+    let heart = crate::lastfm::HEART;
+    match line.strip_prefix(heart) {
+        Some(rest) if font.glyph_id(heart).0 == 0 => {
+            let mut it = Item::new(font, px, rest.to_string(), color);
+            it.heart = true;
+            Some(it)
+        }
+        _ => Some(Item::new(font, px, line, color)),
+    }
+}
+
+/// Room the drawn heart takes before the text (its own width; the text starts
+/// with " · " after it).
+fn heart_w(px: f32) -> f32 {
+    0.62 * px
+}
+
+/// A small heart sitting on the baseline, about as tall as the x-height.
+fn draw_heart(pm: &mut Pixmap, x: f32, baseline: f32, px: f32, color: Rgba) {
+    let s = 0.62 * px; // width
+    let (cx, top, bottom) = (x + s / 2.0, baseline - 0.62 * px, baseline - 0.02 * px);
+    let mid = top + 0.3 * (bottom - top);
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(cx, bottom);
+    pb.cubic_to(cx - 0.2 * s, bottom - 0.25 * (bottom - top), x, mid + 0.25 * (bottom - top), x, mid);
+    pb.cubic_to(x, top - 0.02 * px, cx - 0.04 * s, top - 0.04 * px, cx, top + 0.22 * (bottom - top));
+    pb.cubic_to(cx + 0.04 * s, top - 0.04 * px, x + s, top - 0.02 * px, x + s, mid);
+    pb.cubic_to(x + s, mid + 0.25 * (bottom - top), cx + 0.2 * s, bottom - 0.25 * (bottom - top), cx, bottom);
+    pb.close();
+    if let Some(p) = pb.finish() {
+        let c = color.map(|v| (v * 255.0).round() as u8);
+        draw::fill(pm, &p, tiny_skia::Color::from_rgba8(c[0], c[1], c[2], c[3]));
+    }
 }

@@ -67,6 +67,7 @@ fn parse_args() -> Result<Args, String> {
                      VINYLVAULT_SHELF your shared VinylVault shelf link or slug: draws your pressing\n     \
                      VINYLVAULT_CATALOGUE  on (default) or off: else draw a real pressing of the album\n     \
                      PROMO            on (default) or off: the small VinylVault mentions\n     \
+                     STATS            on (default) or off: your play counts under the playing track\n     \
                      POLL_SECS        seconds between Last.fm checks (default 2; 1 s near a track's end)\n     \
                      ROTATE           0, 90, 180 or 270 (default: what the panel reports, else 0)\n     \
                      CONNECTOR        screen to use, e.g. HDMI-A-1 or DSI-1 (default: first connected)\n     \
@@ -119,6 +120,8 @@ struct Look {
     theme: Theme,
     twelve_hour: bool,
     promo: bool,
+    /// Your play counts under the playing track (STATS=off hides them).
+    stats: bool,
 }
 
 fn look() -> Result<Look, String> {
@@ -132,7 +135,8 @@ fn look() -> Result<Look, String> {
         Some(v) => return Err(format!("CLOCK must be 24h or 12h (got {v})")),
     };
     let promo = !matches!(env("PROMO").as_deref(), Some("off" | "0" | "false" | "no"));
-    Ok(Look { theme, twelve_hour, promo })
+    let stats = !matches!(env("STATS").as_deref(), Some("off" | "0" | "false" | "no"));
+    Ok(Look { theme, twelve_hour, promo, stats })
 }
 
 fn main() {
@@ -395,7 +399,10 @@ fn compose_loop(
 
         // Wake on the next minute (clock), or on news.
         match rx.recv_timeout(until_next_minute()) {
-            Ok(Msg::Lastfm(lastfm::Update::Track(t))) => {
+            Ok(Msg::Lastfm(lastfm::Update::Track(mut t))) => {
+                if !look.stats {
+                    t.iter_mut().for_each(|t| t.stats = None);
+                }
                 track = Some(t);
                 error = None;
             }
@@ -429,7 +436,7 @@ fn snapshot(
     path: &str,
 ) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(20);
-    let track = loop {
+    let mut track = loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Msg::Lastfm(lastfm::Update::Track(t))) => break t,
             Ok(Msg::Lastfm(lastfm::Update::Error(e))) => return Err(e),
@@ -437,6 +444,14 @@ fn snapshot(
             Err(_) => return Err("no answer from Last.fm within 20 s".into()),
         }
     };
+    // Play counts follow a moment later (if Last.fm knows any).
+    if look.stats && track.as_ref().is_some_and(|t| t.playing) {
+        if let Ok(Msg::Lastfm(lastfm::Update::Track(t))) = rx.recv_timeout(Duration::from_secs(5)) {
+            track = t;
+        }
+    } else {
+        track.iter_mut().for_each(|t| t.stats = None);
+    }
     let idle = idle || !track.as_ref().is_some_and(|t| t.playing);
     let pressing = track.as_ref().and_then(|t| records.pressing(t));
     if let Some(p) = &pressing {
@@ -482,6 +497,7 @@ fn bench(fonts: &fonts::Fonts) {
         art: Some(std::sync::Arc::new(art)),
         playing: true,
         played_at: None,
+        stats: Some(lastfm::Stats { loved: true, track_plays: Some(37), artist_plays: Some(1204) }),
     };
     println!("Per-frame budget at 60 fps: 16.7 ms. 'worst frame' = the most work any single frame does.");
     println!("{:<8} {:<10} {:>14} {:>13} {:>13}", "theme", "size", "render (bg)", "steady frame", "worst frame");

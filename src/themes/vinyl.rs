@@ -10,7 +10,7 @@
 use tiny_skia::{Color, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::draw::{self, Align, DIM, FAINT, WHITE, clamp};
-use crate::scene::{Ctx, Extras, Item, Spinner, draw_stack, size_to_width, stack_height};
+use crate::scene::{self, Ctx, Extras, Item, Spinner, draw_stack, size_to_width, stack_height};
 use crate::themes::pressing;
 use crate::vinylvault::{Finish, Pressing};
 
@@ -85,6 +85,9 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
     let (cx0, cw, top, bottom) = col;
     let f = c.fonts;
     let mut items = Vec::new();
+    // The play-count line arrives a moment after the track: lay out without
+    // it, so nothing above it moves when it appears.
+    let mut late: Option<f32> = None;
     if c.playing {
         let t = c.track.expect("playing implies a track");
         let title_px = clamp(20.0, 7.2 * vmin, 76.0);
@@ -96,6 +99,11 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
         items.push(Item::new(&f.regular, clamp(14.0, 4.2 * vmin, 40.0), t.artist.clone(), DIM).gap(0.2 * title_px));
         if !t.album.is_empty() {
             items.push(Item::new(&f.regular, clamp(11.0, 2.8 * vmin, 26.0), t.album.clone(), FAINT).gap(4.0));
+        }
+        if let Some(it) = scene::stats_item(&f.regular, clamp(10.0, 2.2 * vmin, 18.0), t, FAINT) {
+            let it = it.gap(if t.album.is_empty() { 4.0 } else { 2.0 });
+            late = Some(it.gap + draw::line_h(it.px));
+            items.push(it);
         }
         if let Some(p) = c.pressing {
             let tint = brightest(p).unwrap_or(pal.accent);
@@ -121,8 +129,14 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
             items.push(Item::new(&f.regular, clamp(13.0, 3.4 * vmin, 30.0), format!("{} — {}", t.title, t.artist), DIM).gap(2.0));
         }
     }
-    let block = stack_height(&items);
+    let full = stack_height(&items);
+    let block = full - late.unwrap_or(0.0);
     let y = if stacked { top + ((bottom - top) - block).max(0.0) / 2.0 } else { (h - block) / 2.0 };
+    // Unless it would run off the bottom: then make room after all.
+    let y = match late {
+        Some(lh) => y.min(bottom - full).max(y - lh),
+        None => y,
+    };
     let eq = draw_stack(pm, &items, (cx0, cw), y, align);
 
     Extras { eq, spinner: Some(spinner), ..Default::default() }
