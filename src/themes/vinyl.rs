@@ -93,7 +93,7 @@ pub fn render(pm: &mut Pixmap, c: &Ctx) -> Extras {
         if let Some(p) = c.pressing {
             let tint = brightest(p).unwrap_or(pal.accent);
             items.push(
-                Item::new(&f.bold, clamp(10.0, 2.2 * vmin, 18.0), format!("YOUR PRESSING · {}", p.caption().to_uppercase()), draw::rgba(tint, 1.0))
+                Item::new(&f.bold, clamp(10.0, 2.2 * vmin, 18.0), format!("{} · {}", if p.owned { "YOUR PRESSING" } else { "ON VINYL" }, p.caption().to_uppercase()), draw::rgba(tint, 1.0))
                     .track(0.14)
                     .gap(0.35 * title_px),
             );

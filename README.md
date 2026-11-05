@@ -37,6 +37,12 @@ solid colour, with a "YOUR PRESSING · RED MARBLED · LTD. 500" line. Albums you
 The shelf is read-only and public only while sharing is on, so no password goes on the Pi.
 It refreshes every 15 minutes; matching ignores "(Deluxe Edition)", " - Single" and
 featured artists.
+
+**No shelf, or an album you don't own?** The vinyl look then draws a real pressing of
+that album from the public VinylVault catalogue ("ON VINYL · MOONSTONE BLUE MARBLED"),
+picked once per album so it stays the same between plays. Albums you own on plain black
+stay black. Only exact album + artist matches are used; otherwise the record is black.
+Turn this off with `VINYLVAULT_CATALOGUE=off`.
 `CLOCK=12h` switches the clock to 12-hour time.
 
 ## How it works
@@ -117,6 +123,7 @@ or edit `/etc/now-playing/env` and `sudo systemctl restart now-playing`:
 | `THEME` | `vinyl` (default), `poster`, `ambient` |
 | `CLOCK` | `24h` (default) or `12h` |
 | `VINYLVAULT_SHELF` | your shared VinylVault shelf link or slug (optional) |
+| `VINYLVAULT_CATALOGUE` | `on` (default) or `off`: catalogue pressings for albums not on your shelf |
 | `ROTATE` | `0`, `90`, `180`, `270` (clockwise), or `auto` (default) |
 | `CONNECTOR` | e.g. `HDMI-A-1`, `DSI-1` (default: first connected screen) |
 

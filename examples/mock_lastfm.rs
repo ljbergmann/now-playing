@@ -3,6 +3,9 @@
 //!
 //! Switch scenarios with: curl -X POST localhost:9911/mode/<playing|stopped|noart|long>
 //!
+//! MOCK_ARTIST / MOCK_ALBUM / MOCK_TITLE override the "playing" track (e.g. to
+//! try the VinylVault catalogue fallback with a real album).
+//!
 //! Also a fake VinylVault shelf that owns the test album:
 //!   VINYLVAULT_SHELF=http://localhost:9911/shelf/test
 //!   curl -X POST localhost:9911/finish/<solid|marbled|splatter|swirl|galaxy|picture_disc|half_and_half|clear|glow>
@@ -95,8 +98,11 @@ fn main() {
             "long" => ("A Remarkably Long Song Title That Keeps Going Well Past Two Lines Of Text On Small Screens", "Orchestra of the Very Long Name and Friends", format!("{base}a.png"), r#","@attr":{"nowplaying":"true"}"#.into()),
             _ => ("Ultraviolet Hours (Extended Version)", "Elsa Morrow & The Night Shift", format!("{base}a.png"), r#","@attr":{"nowplaying":"true"}"#.into()),
         };
+        let custom = mode == "playing";
+        let env = |k: &str, d: &str| if custom { std::env::var(k).unwrap_or_else(|_| d.to_string()) } else { d.to_string() };
+        let (name, artist, album) = (env("MOCK_TITLE", name), env("MOCK_ARTIST", artist), env("MOCK_ALBUM", "Signals From the Lake"));
         let body = format!(
-            r##"{{"recenttracks":{{"track":[{{"name":"{name}","artist":{{"#text":"{artist}"}},"album":{{"#text":"Signals From the Lake"}},"image":[{{"size":"small","#text":"{img}"}},{{"size":"extralarge","#text":"{img}"}}]{extra}}}]}}}}"##
+            r##"{{"recenttracks":{{"track":[{{"name":"{name}","artist":{{"#text":"{artist}"}},"album":{{"#text":"{album}"}},"image":[{{"size":"small","#text":"{img}"}},{{"size":"extralarge","#text":"{img}"}}]{extra}}}]}}}}"##
         );
         let json = Header::from_bytes("Content-Type", "application/json").unwrap();
         let _ = req.respond(Response::from_string(body).with_header(json));

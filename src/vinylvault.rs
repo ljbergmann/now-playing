@@ -4,8 +4,13 @@
 //! it only exists while the owner has sharing switched on), refreshes it every
 //! 15 minutes, and matches Last.fm's album + artist against it. The vinyl look
 //! then draws the record as that pressing: marbled, splatter, clear, ...
+//!
+//! Albums that aren't on the shelf (or with no shelf set up) fall back to a real
+//! pressing of that album from the public VinylVault catalogue (`/search`),
+//! picked once per album so it doesn't change between plays.
 
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -52,6 +57,8 @@ pub struct Pressing {
     pub edition_size: Option<u32>,
     pub is_limited: bool,
     pub is_numbered: bool,
+    /// From your shelf (true), or a catalogue pressing of the album (false).
+    pub owned: bool,
 }
 
 impl Pressing {
@@ -60,9 +67,20 @@ impl Pressing {
         self.finish == Finish::Solid && self.colors.iter().all(|c| c.iter().all(|&v| v < 48))
     }
 
+    /// The name to show: Discogs-style names put the official one in brackets,
+    /// "Blue Translucent Marbled [Moonstone Blue Marbled] Signed Insert".
+    pub fn display_name(&self) -> String {
+        let n = self.name.trim();
+        match (n.find('['), n.find(']')) {
+            (Some(a), Some(b)) if b > a + 1 => n[a + 1..b].trim().to_string(),
+            _ if n.is_empty() => "Coloured vinyl".to_string(),
+            _ => n.to_string(),
+        }
+    }
+
     /// "PINK MARBLED · LTD. 500"
     pub fn caption(&self) -> String {
-        let mut parts = vec![if self.name.is_empty() { "Coloured vinyl".to_string() } else { self.name.clone() }];
+        let mut parts = vec![self.display_name()];
         match (self.edition_size, self.is_limited, self.is_numbered) {
             (Some(n), _, true) => parts.push(format!("Numbered, {n}")),
             (Some(n), _, false) => parts.push(format!("Ltd. {n}")),
@@ -104,10 +122,24 @@ struct PressingJson {
     #[serde(default)]
     colour_hexes: Option<Vec<String>>,
     edition_size: Option<u32>,
-    #[serde(default)]
-    is_limited: bool,
-    #[serde(default)]
-    is_numbered: bool,
+    is_limited: Option<bool>,
+    is_numbered: Option<bool>,
+    /// Catalogue search results only: use "accepted" rows.
+    review_state: Option<String>,
+}
+
+impl PressingJson {
+    fn into_pressing(self, owned: bool) -> Pressing {
+        Pressing {
+            name: self.colourway_name.unwrap_or_default(),
+            finish: Finish::parse(self.finish.as_deref().unwrap_or("")),
+            colors: self.colour_hexes.unwrap_or_default().iter().filter_map(|h| hex(h)).take(6).collect(),
+            edition_size: self.edition_size,
+            is_limited: self.is_limited.unwrap_or(false),
+            is_numbered: self.is_numbered.unwrap_or(false),
+            owned,
+        }
+    }
 }
 
 fn hex(s: &str) -> Option<[u8; 3]> {
@@ -131,14 +163,7 @@ fn parse(body: &str) -> Result<Vec<Record>, String> {
         .map(|(title, artist, pressing)| Record {
             title_key: norm_title(&title),
             artist_key: norm(&artist),
-            pressing: pressing.map(|p| Pressing {
-                name: p.colourway_name.unwrap_or_default(),
-                finish: Finish::parse(p.finish.as_deref().unwrap_or("")),
-                colors: p.colour_hexes.unwrap_or_default().iter().filter_map(|h| hex(h)).take(6).collect(),
-                edition_size: p.edition_size,
-                is_limited: p.is_limited,
-                is_numbered: p.is_numbered,
-            }),
+            pressing: pressing.map(|p| p.into_pressing(true)),
         })
         .collect())
 }
@@ -183,25 +208,142 @@ fn primary_artist(s: &str) -> String {
     norm(&lower[..end])
 }
 
-/// Finds the owned pressing for a Last.fm album/artist, if any.
-pub fn lookup(shelf: &Shelf, album: &str, artist: &str) -> Option<Pressing> {
+fn artist_matches(key: &str, main: &str) -> bool {
+    key.is_empty() || main.is_empty() || key.contains(main) || main.contains(key)
+}
+
+/// Is this Last.fm album on the shelf?
+/// `None` = not on the shelf; `Some(None)` = owned, but plain black (or not
+/// described), so draw the normal record; `Some(Some(p))` = owned special pressing.
+pub fn lookup(shelf: &Shelf, album: &str, artist: &str) -> Option<Option<Pressing>> {
     let title = norm_title(album);
     if title.is_empty() {
         return None;
     }
     let main = primary_artist(artist);
     let records = shelf.read().ok()?;
-    records
-        .iter()
-        .filter(|r| r.title_key == title)
-        .find(|r| {
-            r.artist_key.is_empty()
-                || main.is_empty()
-                || r.artist_key.contains(&main)
-                || main.contains(&r.artist_key)
+    let r = records.iter().filter(|r| r.title_key == title).find(|r| artist_matches(&r.artist_key, &main))?;
+    Some(r.pressing.clone().filter(|p| !p.is_plain_black()))
+}
+
+// --- catalogue fallback ------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SearchJson {
+    #[serde(default)]
+    items: Vec<SearchItem>,
+}
+#[derive(Deserialize)]
+struct SearchItem {
+    variant: Option<PressingJson>,
+    release_title: Option<String>,
+    artist_name: Option<String>,
+}
+
+/// Raw search text: main artist + album without bracketed noise.
+fn search_query(album: &str, artist: &str) -> String {
+    let lower = artist.to_lowercase();
+    let end = [",", " & ", " feat", " ft.", " x ", " with "].iter().filter_map(|m| lower.find(m)).min().unwrap_or(artist.len());
+    let mut title = String::new();
+    let mut depth = 0;
+    for c in album.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => title.push(c),
+            _ => {}
+        }
+    }
+    format!("{} {}", artist[..end].trim(), title.trim())
+}
+
+/// Picks a pressing of exactly this album from search results. Strict on both
+/// title and artist: the search is fuzzy ("rumours" also finds an orchestra's
+/// tribute album and a band called Rumours). Prefers coloured pressings; the
+/// pick is fixed per album (seeded by its name), not random per play.
+fn pick(items: Vec<SearchItem>, album: &str, artist: &str) -> Option<Pressing> {
+    let (title, main) = (norm_title(album), primary_artist(artist));
+    let candidates: Vec<Pressing> = items
+        .into_iter()
+        .filter(|it| it.release_title.as_deref().is_some_and(|t| norm_title(t) == title))
+        .filter(|it| {
+            let a = norm(it.artist_name.as_deref().unwrap_or(""));
+            !a.is_empty() && !main.is_empty() && artist_matches(&a, &main)
         })
-        .and_then(|r| r.pressing.clone())
+        .filter_map(|it| it.variant)
+        .filter(|v| v.review_state.as_deref().is_none_or(|s| s == "accepted"))
+        .map(|v| v.into_pressing(false))
         .filter(|p| !p.is_plain_black())
+        .collect();
+    let coloured: Vec<&Pressing> = candidates.iter().filter(|p| !p.colors.is_empty()).collect();
+    let pool: Vec<&Pressing> = if coloured.is_empty() { candidates.iter().collect() } else { coloured };
+    if pool.is_empty() {
+        return None;
+    }
+    let seed = format!("{main}|{title}").bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+    Some(pool[(seed % pool.len() as u64) as usize].clone())
+}
+
+/// Looks up a pressing of an album in the public catalogue; one request per
+/// album, remembered (including "none" and failures) for the life of the process.
+pub struct Catalogue {
+    base: String,
+    agent: ureq::Agent,
+    cache: Mutex<HashMap<String, Option<Pressing>>>,
+}
+
+impl Catalogue {
+    pub fn new(base: &str) -> Self {
+        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(6)).user_agent("now-playing-display/0.2").build();
+        Catalogue { base: base.trim_end_matches('/').to_string(), agent, cache: Mutex::new(HashMap::new()) }
+    }
+
+    pub fn pressing_for(&self, album: &str, artist: &str) -> Option<Pressing> {
+        let key = format!("{}|{}", primary_artist(artist), norm_title(album));
+        if norm_title(album).is_empty() {
+            return None;
+        }
+        if let Some(hit) = self.cache.lock().ok()?.get(&key) {
+            return hit.clone();
+        }
+        let url = format!("{}/search?q={}", self.base, encode(&search_query(album, artist)));
+        let found = match self.agent.get(&url).call() {
+            Ok(resp) => {
+                let mut body = String::new();
+                let ok = std::io::Read::read_to_string(&mut std::io::Read::take(resp.into_reader(), 8 * 1024 * 1024), &mut body).is_ok();
+                if ok { serde_json::from_str::<SearchJson>(&body).ok().and_then(|s| pick(s.items, album, artist)) } else { None }
+            }
+            Err(_) => None, // quietly: the plain black record is a fine fallback
+        };
+        if let Some(p) = &found {
+            eprintln!("VinylVault catalogue: {} — {} on {}", artist, album, p.caption());
+        }
+        if let Ok(mut c) = self.cache.lock() {
+            c.insert(key, found.clone());
+        }
+        found
+    }
+}
+
+/// The site behind a shelf setting (so a self-hosted VinylVault works too).
+pub fn base_url(shelf_setting: Option<&str>) -> String {
+    match shelf_setting.map(str::trim) {
+        Some(s) if s.starts_with("http://") || s.starts_with("https://") => match s.find("/shelf/") {
+            Some(i) => s[..i].to_string(),
+            None => DEFAULT_BASE.into(),
+        },
+        _ => DEFAULT_BASE.into(),
+    }
+}
+
+fn encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b' ' => "+".into(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 // --- fetching --------------------------------------------------------------
@@ -292,7 +434,7 @@ mod tests {
     #[test]
     fn matches_with_noise_in_titles_and_artists() {
         let s = shelf(JSON);
-        let p = lookup(&s, "Escapism. / The Thrill Is Gone. (Deluxe Edition)", "RAYE, 070 Shake").unwrap();
+        let p = lookup(&s, "Escapism. / The Thrill Is Gone. (Deluxe Edition)", "RAYE, 070 Shake").unwrap().unwrap();
         assert_eq!(p.finish, Finish::Marbled);
         assert_eq!(p.colors, vec![[0xCC, 0x29, 0x2E], [0xF7, 0xF7, 0xF5]]);
         assert_eq!(p.caption(), "Red Marbled · Ltd. 500");
@@ -301,9 +443,11 @@ mod tests {
     #[test]
     fn plain_black_and_unknown_are_not_special() {
         let s = shelf(JSON);
-        assert!(lookup(&s, "Black Album", "Someone").is_none());
-        assert!(lookup(&s, "No Pressing Info", "X").is_none());
-        assert!(lookup(&s, "Escapism.", "Different Artist").is_none());
+        // Owned, but nothing special: Some(None) — must NOT fall back to the catalogue.
+        assert_eq!(lookup(&s, "Black Album", "Someone"), Some(None));
+        assert_eq!(lookup(&s, "No Pressing Info", "X"), Some(None));
+        // Not on the shelf at all.
+        assert_eq!(lookup(&s, "Escapism.", "Different Artist"), None);
     }
 
     /// Bodies exactly as the VinylVault endpoint's own tests expect them
@@ -323,11 +467,54 @@ mod tests {
         ]}"##;
         let s = shelf(json);
         assert_eq!(s.read().unwrap().len(), 3);
-        let p = lookup(&s, "Shelf Album", "Shelf Act").unwrap();
+        let p = lookup(&s, "Shelf Album", "Shelf Act").unwrap().unwrap();
         assert_eq!((p.finish, p.caption().as_str()), (Finish::Marbled, "Pink Marbled · Ltd. 500"));
-        let p = lookup(&s, "Loose Record", "Someone feat. Other").unwrap();
+        let p = lookup(&s, "Loose Record", "Someone feat. Other").unwrap().unwrap();
         assert_eq!(p.finish, Finish::Splatter);
-        assert!(lookup(&s, "Mystery", "Anyone").is_none()); // plain, no colours
+        assert_eq!(lookup(&s, "Mystery", "Anyone"), Some(None)); // owned, plain
+    }
+
+    /// Shaped like the live `/search?q=fleetwood mac rumours` answer: the fuzzy
+    /// search returns tribute albums and other titles that must not be used.
+    #[test]
+    fn catalogue_pick_is_strict_and_stable() {
+        let json = r##"{"items":[
+          {"artist_name":"Royal Philharmonic Orchestra","release_title":"Plays Fleetwood Mac's Rumours",
+           "variant":{"colourway_name":"Gold","finish":"solid","colour_hexes":["#D4AD4D"],"review_state":"accepted"}},
+          {"artist_name":"Fleetwood Mac","release_title":"Rumours In Concert",
+           "variant":{"colourway_name":"Burgundy Marbled","finish":"marbled","colour_hexes":["#73192E"],"review_state":"accepted"}},
+          {"artist_name":"Fleetwood Mac","release_title":"Rumours",
+           "variant":{"colourway_name":"Black","finish":"solid","colour_hexes":[],"review_state":"accepted"}},
+          {"artist_name":"Fleetwood Mac","release_title":"Rumours",
+           "variant":{"colourway_name":"Clear","finish":"clear","colour_hexes":["#E0EAF0"],"review_state":"accepted"}},
+          {"artist_name":"Fleetwood Mac","release_title":"Rumours",
+           "variant":{"colourway_name":"Proposed Pink","finish":"solid","colour_hexes":["#F599BD"],"review_state":"proposed"}}
+        ]}"##;
+        let items = || serde_json::from_str::<SearchJson>(json).unwrap().items;
+        let p = pick(items(), "Rumours (Super Deluxe)", "Fleetwood Mac").unwrap();
+        assert_eq!(p.name, "Clear");
+        assert!(!p.owned);
+        assert_eq!(pick(items(), "Rumours", "Fleetwood Mac"), Some(p)); // same pick every time
+        assert!(pick(items(), "Tusk", "Fleetwood Mac").is_none());
+        assert!(pick(items(), "Rumours", "Rumours").is_none()); // a band called Rumours
+    }
+
+    #[test]
+    fn official_name_from_brackets() {
+        let mut p = Pressing { name: "Blue Translucent Marbled [Moonstone Blue Marbled] Signed Insert".into(),
+            finish: Finish::Marbled, colors: vec![], edition_size: None, is_limited: false, is_numbered: false, owned: false };
+        assert_eq!(p.caption(), "Moonstone Blue Marbled");
+        p.name = "Red".into();
+        p.edition_size = Some(300);
+        assert_eq!(p.caption(), "Red · Ltd. 300");
+    }
+
+    #[test]
+    fn query_and_base() {
+        assert_eq!(search_query("Sabotage (Deluxe) [2024]", "Bebe Rexha, YEJI"), "Bebe Rexha Sabotage");
+        assert_eq!(base_url(Some("https://vv.example/shelf/ab12")), "https://vv.example");
+        assert_eq!(base_url(Some("ab12")), DEFAULT_BASE);
+        assert_eq!(base_url(None), DEFAULT_BASE);
     }
 
     #[test]

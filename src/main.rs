@@ -65,6 +65,7 @@ fn parse_args() -> Result<Args, String> {
                      THEME            vinyl (default), poster or ambient\n     \
                      CLOCK            24h (default) or 12h\n     \
                      VINYLVAULT_SHELF your shared VinylVault shelf link or slug: draws your pressing\n     \
+                     VINYLVAULT_CATALOGUE  on (default) or off: else draw a real pressing of the album\n     \
                      POLL_SECS        seconds between Last.fm checks (default 6)\n     \
                      ROTATE           0, 90, 180 or 270 (default: what the panel reports, else 0)\n     \
                      CONNECTOR        screen to use, e.g. HDMI-A-1 or DSI-1 (default: first connected)\n     \
@@ -157,23 +158,30 @@ fn run() -> Result<(), String> {
     let tx = msg_tx.clone();
     lastfm::spawn(lastfm_config()?, move |u| tx.send(Msg::Lastfm(u)).is_ok());
 
+    let shelf_setting = env("VINYLVAULT_SHELF");
+    let catalogue = match env("VINYLVAULT_CATALOGUE").as_deref() {
+        Some("off" | "0" | "false" | "no") => None,
+        _ => Some(vinylvault::Catalogue::new(&vinylvault::base_url(shelf_setting.as_deref()))),
+    };
     if let Some(path) = args.snapshot {
-        let shelf = match env("VINYLVAULT_SHELF") {
-            Some(s) => Some(vinylvault::load_once(&s)?),
+        let shelf = match &shelf_setting {
+            Some(s) => Some(vinylvault::load_once(s)?),
             None => None,
         };
-        return snapshot(&fonts, &look, shelf.as_ref(), msg_rx, args.size.unwrap_or((800, 480)), args.idle, &path);
+        let records = Records { shelf, catalogue };
+        return snapshot(&fonts, &look, &records, msg_rx, args.size.unwrap_or((800, 480)), args.idle, &path);
     }
-    let shelf = env("VINYLVAULT_SHELF").map(|s| {
+    let shelf = shelf_setting.map(|s| {
         let tx = msg_tx.clone();
         vinylvault::spawn(&s, move || tx.send(Msg::ShelfUpdated).is_ok())
     });
+    let records = Records { shelf, catalogue };
 
     let Some(mut display) = wait_for_display(&opts) else { return Ok(()) };
     let (mut w, mut h) = display.size();
 
     let (scene_tx, scene_rx) = mpsc::channel::<(Scene, bool)>();
-    thread::spawn(move || compose_loop(fonts, look, shelf, (w, h), msg_rx, scene_tx));
+    thread::spawn(move || compose_loop(fonts, look, records, (w, h), msg_rx, scene_tx));
 
     let mut comp = frame::Compositor::new(w, h);
     loop {
@@ -243,10 +251,27 @@ fn until_next_minute() -> Duration {
     Duration::from_millis(60_000 - ms % 60_000 + 50)
 }
 
+/// Where pressings come from: your shelf first, then the public catalogue.
+struct Records {
+    shelf: Option<vinylvault::Shelf>,
+    catalogue: Option<vinylvault::Catalogue>,
+}
+
+impl Records {
+    fn pressing(&self, t: &lastfm::Track) -> Option<vinylvault::Pressing> {
+        // On your shelf decides it, even when it's plain black: never dress your
+        // own black copy up as somebody else's coloured one.
+        if let Some(on_shelf) = self.shelf.as_ref().and_then(|s| vinylvault::lookup(s, &t.album, &t.artist)) {
+            return on_shelf;
+        }
+        self.catalogue.as_ref().and_then(|c| c.pressing_for(&t.album, &t.artist))
+    }
+}
+
 fn compose_loop(
     fonts: fonts::Fonts,
     mut look: Look,
-    shelf: Option<vinylvault::Shelf>,
+    records: Records,
     size: (usize, usize),
     rx: mpsc::Receiver<Msg>,
     tx: mpsc::Sender<(Scene, bool)>,
@@ -259,8 +284,9 @@ fn compose_loop(
 
     loop {
         let idle = preview_idle || !track.as_ref().is_some_and(|t| t.as_ref().is_some_and(|t| t.playing));
-        let pressing = match (&shelf, &track) {
-            (Some(s), Some(Some(t))) => vinylvault::lookup(s, &t.album, &t.artist),
+        // Only the vinyl look draws pressings: don't search the catalogue for the others.
+        let pressing = match &track {
+            Some(Some(t)) if look.theme == Theme::Vinyl => records.pressing(t),
             _ => None,
         };
         let view = match &track {
@@ -312,7 +338,7 @@ fn compose_loop(
 fn snapshot(
     fonts: &fonts::Fonts,
     look: &Look,
-    shelf: Option<&vinylvault::Shelf>,
+    records: &Records,
     rx: mpsc::Receiver<Msg>,
     (w, h): (usize, usize),
     idle: bool,
@@ -328,12 +354,9 @@ fn snapshot(
         }
     };
     let idle = idle || !track.as_ref().is_some_and(|t| t.playing);
-    let pressing = match (shelf, &track) {
-        (Some(s), Some(t)) => vinylvault::lookup(s, &t.album, &t.artist),
-        _ => None,
-    };
+    let pressing = track.as_ref().and_then(|t| records.pressing(t));
     if let Some(p) = &pressing {
-        println!("your pressing: {}", p.caption());
+        println!("{} pressing: {}", if p.owned { "your" } else { "catalogue" }, p.caption());
     }
     let view = View::Track { track: track.as_ref(), idle, pressing: pressing.as_ref() };
     let scene = scene::render(fonts, w, h, &view, SystemTime::now(), look.theme, look.twelve_hour);
@@ -385,6 +408,7 @@ fn bench(fonts: &fonts::Fonts) {
         edition_size: Some(500),
         is_limited: true,
         is_numbered: false,
+        owned: true,
     };
     let cases = [
         ("vinyl", Theme::Vinyl, None),
